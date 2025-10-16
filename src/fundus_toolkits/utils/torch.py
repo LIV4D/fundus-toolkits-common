@@ -1,18 +1,69 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional, TypeVar
+from types import EllipsisType
+from typing import NamedTuple, Optional, Tuple, TypeAlias, TypeVar, Union
 
 import numpy as np
 import numpy.typing as npt
 import torch
 
-if TYPE_CHECKING:
-    from torch._prims_common import DeviceLikeType
-
+########################################################################################################################
+# === TYPING ===
 TensorArray = TypeVar("TensorArray", torch.Tensor, npt.NDArray)
+DeviceLikeType: TypeAlias = Union[str, torch.device, int]
 
 
-def img_to_torch(x: TensorArray, device: Optional[DeviceLikeType] = None):
+########################################################################################################################
+# === TENSOR SPEC ===
+class TensorSpec(NamedTuple):
+    name: str
+    dim_names: Tuple[str, ...]
+    dtype: Optional[torch.dtype] = None
+    description: str = ""
+    optional: bool = False
+
+    def __str__(self) -> str:
+        doc = self.name + f" [{', '.join(self.dim_names)}"
+        if self.dtype is not None:
+            doc += f" | {self.dtype}"
+        doc += "]"
+
+        if self.description:
+            doc += f": {self.description}"
+        if self.optional:
+            doc += " (optional)"
+
+        return doc
+
+    def __repr__(self) -> str:
+        return (
+            f"TensorSpec(name={self.name}, dim_names={self.dim_names}, dtype={self.dtype}, "
+            f"description={self.description})"
+        )
+
+    def update(
+        self,
+        name: str | EllipsisType = ...,
+        dim_names: Tuple[str, ...] | EllipsisType = ...,
+        dtype: Optional[torch.dtype] | EllipsisType = ...,
+        description: str | EllipsisType = ...,
+        optional: bool | EllipsisType = ...,
+    ) -> TensorSpec:
+        """
+        Create a new TensorSpec updated with the given keyword arguments.
+        """
+        return TensorSpec(
+            name=name if name is not ... else self.name,
+            dim_names=dim_names if dim_names is not ... else self.dim_names,
+            dtype=dtype if dtype is not ... else self.dtype,
+            description=description if description is not ... else self.description,
+            optional=optional if optional is not ... else self.optional,
+        )
+
+
+########################################################################################################################
+# === NUMPY/TORCH CASTING ===
+def img_to_torch(x: TensorArray, device: Optional[DeviceLikeType] = None, copy=False) -> torch.Tensor:
     """Convert an image to a torch tensor.
 
     Parameters
@@ -31,7 +82,7 @@ def img_to_torch(x: TensorArray, device: Optional[DeviceLikeType] = None):
     elif not isinstance(x, torch.Tensor):
         raise TypeError(f"Unknown type: {type(x)}.\n Expected numpy.ndarray or torch.Tensor.")
     else:
-        t = x
+        t = x if not copy else x.clone()
 
     match t.shape:
         case s if len(s) == 3:

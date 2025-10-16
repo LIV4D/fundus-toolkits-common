@@ -3,33 +3,21 @@ from __future__ import annotations
 __all__ = ["PrePostProcessing", "basic_fundus_pre_postprocessing", "TensorSpec"]
 
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from functools import partial
 from types import EllipsisType
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Dict,
-    NamedTuple,
-    Optional,
-    ParamSpec,
-    Protocol,
-    Tuple,
-    TypeAlias,
-)
+from typing import Any, Literal, NamedTuple, Optional, Protocol
 
 import torch
 
-from .image import crop_pad
-from .math import ensure_superior_multiple
-from .torch import TensorArray, img_to_torch
-
-if TYPE_CHECKING:
-    from torch._prims_common import DeviceLikeType
+from ..utils.image import crop_pad
+from ..utils.math import ensure_superior_multiple
+from ..utils.torch import DeviceLikeType
 
 
 class TensorSpec(NamedTuple):
     name: str
-    dim_names: Tuple[str, ...]
+    dim_names: tuple[str, ...]
     dtype: Optional[torch.dtype] = None
     description: str = ""
     optional: bool = False
@@ -56,7 +44,7 @@ class TensorSpec(NamedTuple):
     def update(
         self,
         name: str | EllipsisType = ...,
-        dim_names: Tuple[str, ...] | EllipsisType = ...,
+        dim_names: tuple[str, ...] | EllipsisType = ...,
         dtype: Optional[torch.dtype] | EllipsisType = ...,
         description: str | EllipsisType = ...,
         optional: bool | EllipsisType = ...,
@@ -73,14 +61,11 @@ class TensorSpec(NamedTuple):
         )
 
 
-P = ParamSpec("P")
-
-
-PreprocessingMethod: TypeAlias = Callable[P, Tuple[Tuple[torch.Tensor, ...], Dict[str, Any]]]
+type PreprocessingMethod[**P] = Callable[P, tuple[tuple[torch.Tensor, ...], dict[str, Any]]]
 
 
 class PostProcessingMethod(Protocol):
-    def __call__(self, *model_outputs: torch.Tensor, preprocessing_info: Dict[str, Any]) -> Tuple[Any, ...]: ...
+    def __call__(self, *model_outputs: torch.Tensor, preprocessing_info: dict[str, Any]) -> tuple[Any, ...]: ...
 
 
 class PrePostProcessing(NamedTuple):
@@ -121,14 +106,14 @@ class PrePostProcessing(NamedTuple):
 
     preprocess: PreprocessingMethod
     postprocess: PostProcessingMethod
-    input_info: Tuple[TensorSpec, ...]
-    model_input_info: Tuple[TensorSpec, ...]
-    model_output_info: Tuple[TensorSpec, ...]
-    output_info: Tuple[TensorSpec, ...]
+    input_info: tuple[TensorSpec, ...]
+    model_input_info: tuple[TensorSpec, ...]
+    model_output_info: tuple[TensorSpec, ...]
+    output_info: tuple[TensorSpec, ...]
 
     def bind_preprocess(
         self, device: Optional[DeviceLikeType] = None, **kwargs: Any
-    ) -> Tuple[Tuple[torch.Tensor, ...], Dict[str, Any]]:
+    ) -> tuple[tuple[torch.Tensor, ...], dict[str, Any]]:
         """
         Bind the preprocess method with the given arguments.
         """
@@ -171,10 +156,41 @@ class PrePostProcessing(NamedTuple):
         for info in self.output_info:
             print("  -", info)
 
+    def update(
+        self,
+        preprocess: PreprocessingMethod | EllipsisType = ...,
+        postprocess: PostProcessingMethod | EllipsisType = ...,
+        input_info: tuple[TensorSpec, ...] | EllipsisType = ...,
+        model_input_info: tuple[TensorSpec, ...] | EllipsisType = ...,
+        model_output_info: tuple[TensorSpec, ...] | EllipsisType = ...,
+        output_info: tuple[TensorSpec, ...] | EllipsisType = ...,
+    ) -> PrePostProcessing:
+        """
+        Create a new PrePostProcessing updated with the given keyword arguments.
+        """
+        return PrePostProcessing(
+            preprocess=preprocess if preprocess is not ... else self.preprocess,
+            postprocess=postprocess if postprocess is not ... else self.postprocess,
+            input_info=input_info if input_info is not ... else self.input_info,
+            model_input_info=model_input_info if model_input_info is not ... else self.model_input_info,
+            model_output_info=model_output_info if model_output_info is not ... else self.model_output_info,
+            output_info=output_info if output_info is not ... else self.output_info,
+        )
+
 
 ########################################################################################################################
 def basic_fundus_pre_postprocessing(
-    standard_resolution: Optional[int] = 1024, *, model_name: Optional[str] = None, auto_resize=True
+    standard_resolution: Optional[int] = 1024,
+    normalize_mean: tuple[float, float, float] | bool = False,
+    normalize_std: tuple[float, float, float] | bool = False,
+    *,
+    model_name: Optional[str] = None,
+    segmented_structure_name: Optional[str] = None,
+    output_channels: bool | Sequence[str] = True,
+    rgb_to_bgr: bool = False,
+    pad_to_multiple: Optional[int] = None,
+    auto_resize=True,
+    final_activation: Optional[Literal["softmax", "sigmoid"]] = None,  # noqa: F821
 ) -> PrePostProcessing:
     """Create a basic pre/post-processing pipeline for fundus images.
 
@@ -182,8 +198,16 @@ def basic_fundus_pre_postprocessing(
     ----------
     standard_resolution : Optional[int], optional
         The standard resolution to use for resizing, by default 1024.
+    normalize_mean : tuple[float, float, float] | bool, optional
+        The mean to use for normalization. If set to True, uses ImageNet mean, by default False.
+    normalize_std : tuple[float, float, float] | bool, optional
+        The standard deviation to use for normalization. If set to True, uses ImageNet std, by default False.
     model_name : Optional[str], optional
         The name of the model. Only used for warning messages, by default None.
+    rgb_to_bgr : bool, optional
+        Whether to convert the input image from RGB to BGR, by default False.
+    pad_to_multiple : Optional[int], optional
+        If provided, pad the input image to be a multiple of this value, by default None.
     auto_resize : bool, optional
         Whether to automatically resize the input image, by default True.
 
@@ -195,15 +219,47 @@ def basic_fundus_pre_postprocessing(
     if model_name is None:
         model_name = "this model"
 
+    ## === PREPROCESSING === ##
+    normalize_mean_std = None
+    if not (normalize_mean is False and normalize_std is False):
+        if normalize_mean is True:
+            mean = (0.485, 0.456, 0.406)  # ImageNet mean
+        elif isinstance(normalize_mean, Sequence) and len(normalize_mean) == 3:
+            mean = normalize_mean
+        else:
+            raise ValueError("normalize_mean must be a tuple of 3 floats or True.")
+
+        if normalize_std is True:
+            std = (0.229, 0.224, 0.225)  # ImageNet std
+        elif isinstance(normalize_std, Sequence) and len(normalize_std) == 3:
+            std = normalize_std
+        else:
+            raise ValueError("normalize_std must be a tuple of 3 floats or True.")
+
+        normalize_mean_std = (mean, std)
+
     def preprocess(
-        fundus: TensorArray, device: Optional[DeviceLikeType] = None
-    ) -> Tuple[Tuple[torch.Tensor], Dict[str, Any]]:
-        x = img_to_torch(fundus, device=device)
+        fundus: torch.Tensor, device: Optional[DeviceLikeType] = None
+    ) -> tuple[tuple[torch.Tensor], dict[str, Any]]:
+        x = fundus
+
+        # --- Preprocess torch tensor ---
+        if x.dtype == torch.uint8:
+            x = x.float() / 255.0
+        if x.ndim == 3:
+            x = x.unsqueeze(0)
+        elif x.ndim != 4:
+            raise ValueError(f"Expected 3 or 4 dimensions, got {x.ndim}.")
+        assert x.shape[1] in (1, 3), f"Fundus image must have 1 or 3 channels, got {x.shape[1]}."
+        if device is not None:
+            x = x.to(device)
+
         final_shape = tuple(x.shape[-2:])
         if fundus.ndim == 4:
             final_shape = (x.shape[0],) + final_shape
-        preprocessing_info: Dict[str, Any] = {"final_shape": final_shape}
+        preprocessing_info: dict[str, Any] = {"final_shape": final_shape}
 
+        # --- Resize if necessary ---
         if standard_resolution is not None and not (
             standard_resolution * 0.75 < x.shape[-1] < standard_resolution * 1.4
         ):
@@ -218,25 +274,46 @@ def basic_fundus_pre_postprocessing(
                     stacklevel=2,
                 )
 
-        x = torch.flip(x, [1])  # RGB to BGR
-        padded_shape = [ensure_superior_multiple(s, 32) for s in x.shape]
-        x = crop_pad(x, padded_shape)
+        # --- Flip RGB to BGR, if necessary ---
+        if rgb_to_bgr:
+            x = torch.flip(x, [1])
 
-        if 1.0 < x.max() <= 255:
-            x = x / 255.0
+        # --- Normalize, if necessary ---
+        if normalize_mean_std is not None:
+            mean, std = [
+                torch.as_tensor(_, device=x.device, dtype=x.dtype).view(1, -1, 1, 1) for _ in normalize_mean_std
+            ]
+            x = (x - mean) / std
+
+        # --- Ensure x shape is a multiple of pad_to_multiple ---
+        if pad_to_multiple is not None:
+            padded_shape = [ensure_superior_multiple(s, pad_to_multiple) for s in x.shape]
+            x = crop_pad(x, padded_shape)
 
         return (x,), preprocessing_info
 
-    def postprocess(*model_outputs: torch.Tensor, preprocessing_info: Dict[str, Any]) -> Tuple[torch.Tensor, ...]:
+    ## === POSTPROCESSING === ##
+    match final_activation:
+        case "softmax":
+            final_activation_f = partial(torch.nn.functional.softmax, dim=1)
+        case "sigmoid":
+            final_activation_f = torch.sigmoid
+        case None:
+            final_activation_f = None
+        case _:
+            raise ValueError(f"Unknown activation: {final_activation}, should be one of [None, 'softmax', 'sigmoid'].")
+
+    def postprocess(*model_outputs: torch.Tensor, preprocessing_info: dict[str, Any]) -> tuple[torch.Tensor, ...]:
         (y,) = model_outputs
-        if y.ndim == 3:
-            y.unsqueeze_(1)
+
+        # --- Apply activation if necessary ---
+        if final_activation_f is not None:
+            y = final_activation_f(y)
 
         # --- Rescale the output if necessary ---
         if "scale_factor" in preprocessing_info:
             f = preprocessing_info["scale_factor"]
             y = torch.nn.functional.interpolate(y, scale_factor=(1 / f,) * 2, mode="bilinear")
-        y = torch.argmax(y, dim=1) if y.shape[1] > 1 else y.unsqueeze(1) > 0.5
 
         # --- Crop or pad the output to the final shape ---
         final_shape = preprocessing_info.get("final_shape", None)
@@ -247,15 +324,28 @@ def basic_fundus_pre_postprocessing(
 
         return (y,)
 
+    ## === DOCUMENTATION === ##
     input_info = TensorSpec("fundus", ("C", "H", "W"), description="The fundus image to segment.")
-    output_info = TensorSpec(
-        "vessels", ("H", "W"), description="The segmentation output (without logits).", dtype=torch.float32
+
+    output_info_name = segmented_structure_name if segmented_structure_name is not None else "segmentation_probability"
+    output_model_info = TensorSpec(
+        output_info_name,
+        (() if not output_channels else ("C",)) + ("H", "W"),
+        description="The segmentation " + ("probabilities" if final_activation_f is None else "logits") + ".",
+        dtype=torch.float32,
     )
+
+    if isinstance(output_channels, Sequence):
+        desc = "The segmentation probabilities. Channels definition: [" + ", ".join(output_channels) + "]."
+        output_info = output_model_info.update(description=desc)
+    else:
+        output_info = output_model_info.update(description="The segmentation probabilities.")
+
     return PrePostProcessing(
         preprocess=preprocess,
         postprocess=postprocess,
         input_info=(input_info,),
         model_input_info=(input_info.update(dtype=torch.float32),),
-        model_output_info=(output_info,),
+        model_output_info=(output_model_info,),
         output_info=(output_info,),
     )

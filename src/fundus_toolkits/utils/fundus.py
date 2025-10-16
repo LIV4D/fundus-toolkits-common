@@ -24,7 +24,7 @@ def fundus_ROI(
     Parameters:
     -----------
     fundus:
-        The fundus image. Expect dimensions: (H, W, rgb).
+        The fundus image. Expect dimensions: (rgb, H, W).
 
     blur_radius:
         The radius of the median blur filter applied on the red channel.
@@ -60,7 +60,7 @@ def fundus_ROI(
     cv2 = import_cv2()
 
     padding = blur_radius + smoothing_radius
-    fundus_red = np.pad(fundus[..., 0], ((padding, padding), (padding, padding)), mode="constant")
+    fundus_red = np.pad(fundus[0], ((padding, padding), (padding, padding)), mode="constant")
     if fundus_red.dtype != np.uint8:
         if fundus_red.min() >= 0 and fundus_red.max() <= 1:
             fundus_red *= 255

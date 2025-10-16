@@ -7,7 +7,7 @@ authors = [
 ]
 description = """A package containing classes and functions common to the series of ``fundus-...-toolkit`` packages."""
 readme = 'README.md'
-requires-python = '>=3.10'
+requires-python = '>=3.12'
 
 license = "MIT"
 license-files = ["LICENSE"]
@@ -48,7 +48,7 @@ line-length = 120
 
 # Avoid trying to fix flake8-bugbear (`B`) violations.
 unfixable = ["B"]
-target-version = "py310"
+target-version = "py312"
 
 [tool.ruff.per-file-ignores]
 "__init__.py" = ["E402", "F401"]
