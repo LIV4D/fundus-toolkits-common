@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Literal, Optional, Self, Tuple, TypeAlias, ove
 import numpy as np
 import numpy.typing as npt
 
-from .utils.geometric import Point
+from .utils.geometric import Point, Rect
 from .utils.image import crop_pad_center, find_centroid, label_map_to_rgb, read_image, resize, write_image
 from .utils.safe_import import is_torch_tensor
 
@@ -137,11 +137,11 @@ class FundusData:
                 roi_mask = self.load_fundus_mask(
                     roi_mask, from_fundus=False, target_shape=shape, reshape_method=reshape_method
                 )
-            self._fundus_mask = roi_mask
+            self._roi_mask = roi_mask
             if shape is None:
                 shape = roi_mask.shape[-2:]  # type: ignore[assignment]
         elif self._image is not None:
-            self._fundus_mask = self.load_fundus_mask(self._image, from_fundus=True)
+            self._roi_mask = self.load_fundus_mask(self._image, from_fundus=True)
 
         if vessels is not None:
             if check_validity:
@@ -205,7 +205,7 @@ class FundusData:
     def update(
         self,
         image: ImageSource | EllipsisType = ...,
-        fundus_mask: ImageSource | EllipsisType = ...,
+        roi_mask: ImageSource | EllipsisType = ...,
         vessels: ImageSource | EllipsisType = ...,
         av: ImageSource | EllipsisType = ...,
         od: ImageSource | EllipsisType = ...,
@@ -225,8 +225,8 @@ class FundusData:
         shape = self.shape if target_shape is None else target_shape
         if image is not ...:
             other._image = other.load_fundus_image(image, target_shape=shape, reshape_method=reshape_method)
-        if fundus_mask is not ...:
-            other._fundus_mask = other.load_fundus_mask(fundus_mask, target_shape=shape, reshape_method=reshape_method)
+        if roi_mask is not ...:
+            other._roi_mask = other.load_fundus_mask(roi_mask, target_shape=shape, reshape_method=reshape_method)
         if vessels is not ...:
             other._vessels = other.load_vessels(vessels, target_shape=shape, reshape_method=reshape_method)
         if av is not ...:
@@ -257,8 +257,8 @@ class FundusData:
         self._immutable = immutable
         if self._image is not None:
             self._image.setflags(write=not immutable)
-        if self._fundus_mask is not None:
-            self._fundus_mask.setflags(write=not immutable)
+        if self._roi_mask is not None:
+            self._roi_mask.setflags(write=not immutable)
         if self._vessels is not None:
             self._vessels.setflags(write=not immutable)
         if self._av is not None:
@@ -634,14 +634,14 @@ class FundusData:
         return self._image
 
     @property
-    def has_fundus_mask(self) -> bool:
-        return self._fundus_mask is not None
+    def has_roi_mask(self) -> bool:
+        return self._roi_mask is not None
 
     @property
-    def fundus_mask(self) -> npt.NDArray[np.bool_]:
-        if self._fundus_mask is None:
+    def roi_mask(self) -> npt.NDArray[np.bool_]:
+        if self._roi_mask is None:
             raise AttributeError("The fundus ROI mask was not provided.")
-        return self._fundus_mask
+        return self._roi_mask
 
     @property
     def has_vessels(self) -> bool:
@@ -759,8 +759,8 @@ class FundusData:
             _description_
         """
         if apply_mask is None:
-            apply_mask = self.has_fundus_mask
-        mask = np.ones(self.shape, bool) if not apply_mask else self.fundus_mask
+            apply_mask = self.has_roi_mask
+        mask = np.ones(self.shape, bool) if not apply_mask else self.roi_mask
         if exclude_od:
             mask &= ~self.od
 
@@ -1011,8 +1011,8 @@ class FundusData:
 
         if self._image is not None:
             other._image = rotate(self._image, angle)
-        if self._fundus_mask is not None:
-            other._fundus_mask = rotate(self._fundus_mask, angle)
+        if self._roi_mask is not None:
+            other._roi_mask = rotate(self._roi_mask, angle)
         if self._vessels is not None:
             other._vessels = rotate(self._vessels, angle)
         if self._od is not None:
@@ -1039,8 +1039,9 @@ class FundusData:
 
         if isinstance(size, tuple):
             shape = size
+        ratio = self.shape[0] / self.shape[1]
         if isinstance(size, int):
-            shape = (size, size)
+            shape = (round(size * ratio), size)
         elif isinstance(size, float):
             shape = self.shape
             shape = int(round(shape[0] * size)), int(round(shape[1] * size))
@@ -1048,15 +1049,18 @@ class FundusData:
             raise
 
         other = copy(self)
+        other._shape = shape
         if self._image is not None:
             other._image = resize(self._image, shape, interpolation=True)
-        if self._fundus_mask is not None:
-            other._fundus_mask = resize(self._fundus_mask, shape, interpolation=True)
+        if self._roi_mask is not None:
+            other._roi_mask = resize(self._roi_mask, shape, interpolation=True)
         if self._vessels is not None:
             other._vessels = resize(self._vessels, shape, interpolation=True)
         if self._av is not None:
-            vessel_mask = self._av > 0
-            other._av = resize(self._av, shape, interpolation=False) * vessel_mask
+            av = resize(self._av, shape, interpolation=False)
+            if other._vessels is not None:
+                av *= other._vessels
+            other._av = av
             # TODO: Smooth av boundaries (right now, only vessel_mask is smoothed)
 
         if self._od is not None:
@@ -1064,3 +1068,50 @@ class FundusData:
         if self._macula is not None:
             other._macula = resize(self._macula, shape, interpolation=True)
         return other
+
+    def crop_to_roi(self, *, pad: float = 0.01, ensure_square=True) -> Self:
+        """Crop all data to the bounding box of the ROI mask.
+
+        Parameters
+        ----------
+        pad : float, optional
+            The padding to add to the bounding box, as a fraction of the bounding-box width, by default 0.01.
+
+        Returns
+        -------
+        FundusData
+            The cropped FundusData.
+        """
+        if self.roi_mask is None:
+            raise ValueError("Cannot crop to ROI: no ROI mask available.")
+        ys, xs = np.where(self.roi_mask)
+        y_min, y_max = ys.min(), ys.max()
+        x_min, x_max = xs.min(), xs.max()
+
+        r = Rect.from_points(y_min, x_min, y_max + 1, x_max + 1)
+        if pad:
+            r = r.pad(int(pad * r.w))
+        if ensure_square:
+            side = max(r.h, r.w)
+            r = r.from_center(r.center, (side, side))
+        src, dst = Rect.from_size(self.shape).crop_pad(r)
+
+        def crop_pad_center(array: npt.NDArray) -> npt.NDArray:
+            result = np.zeros(dtype=array.dtype, shape=array.shape[:-2] + r.shape)
+            result[..., *dst] = array[..., *src]
+            return result
+
+        updated_data = {}
+        if self._image is not None:
+            updated_data["image"] = crop_pad_center(self._image)
+        if self._roi_mask is not None:
+            updated_data["roi_mask"] = crop_pad_center(self._roi_mask)
+        if self._vessels is not None:
+            updated_data["vessels"] = crop_pad_center(self._vessels)
+        if self._av is not None:
+            updated_data["av"] = crop_pad_center(self._av)
+        if self._od is not None:
+            updated_data["od"] = crop_pad_center(self._od)
+        if self._macula is not None:
+            updated_data["macula"] = crop_pad_center(self._macula)
+        return type(self)(**updated_data, name=self._name, immutable=self._immutable)
