@@ -185,13 +185,13 @@ class GenericFundusInference[**P]:
             if infos is not None and (fundus_data := infos.get("fundus_data") if infos else None) is not None:
                 if infos.get("is_single", False):
                     assert isinstance(fundus_data, FundusData), "Mismatch between input and output."
-                    if fundus_data.has_fundus_mask:
-                        fundus_masks[0] = fundus_data.fundus_mask
+                    if fundus_data.has_roi_mask:
+                        fundus_masks[0] = fundus_data.roi_mask
                 else:
                     assert is_fundus_data_sequence(fundus_data) and len(fundus_data) == len(fundus_masks), (
                         "Mismatch between input and output."
                     )
-                    fundus_masks = [f.fundus_mask if f.has_fundus_mask else None for f in fundus_data]
+                    fundus_masks = [f.roi_mask if f.has_roi_mask else None for f in fundus_data]
             # ... infer from fundus image
             if any(m is None for m in fundus_masks):
                 for i, m in enumerate(fundus_masks):
@@ -201,11 +201,11 @@ class GenericFundusInference[**P]:
             # Update FundusData if provided
             fundus_masks_ = typing.cast(list[npt.NDArray[np.bool_]], fundus_masks)
             if isinstance(fundus_data, FundusData):
-                if not fundus_data.has_fundus_mask:
+                if not fundus_data.has_roi_mask:
                     fundus_data.update(fundus_mask=fundus_masks_[0], inplace=True)
             elif is_fundus_data_sequence(fundus_data):
                 for d, mask in zip(fundus_data, fundus_masks_, strict=True):
-                    if not d.has_fundus_mask:
+                    if not d.has_roi_mask:
                         d.update(fundus_mask=mask, inplace=True)
 
             # Stack masks

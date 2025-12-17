@@ -268,10 +268,26 @@ class FundusData:
         if self._macula is not None:
             self._macula.setflags(write=not immutable)
 
-    def mutable_copy(self) -> Self:
-        """Return a mutable copy of this FundusData."""
+    def copy(self, mutable: bool | None = None) -> Self:
+        """Return a mutable copy of this FundusData.
+        Parameters
+        ----------
+        mutable : bool | None, optional
+            If True, the returned FundusData is mutable.
+            If False, the returned FundusData is immutable.
+            If None, the returned FundusData has the opposite mutability of this FundusData.
+            by default None.
+
+        Returns
+        -------
+        FundusData
+            A copy of this FundusData.
+
+        """
         other = copy(self)
-        other._set_immutable_flag(False)
+        if mutable is None:
+            mutable = not self._immutable
+        other._set_immutable_flag(not mutable)
         return other
 
     def remove_od_from_vessels(self):
