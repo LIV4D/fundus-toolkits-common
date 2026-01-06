@@ -621,7 +621,7 @@ class FundusData:
                     seg_ = crop_pad_center(seg_, target_shape)
                 case ReshapeMethod.RAISE:
                     raise ValueError(
-                        f"The artery/vein maps shape {seg_.shape} differs from the fundus image shape {target_shape}."
+                        f"The optic disc / macula maps shape {seg_.shape} differs from the fundus image shape {target_shape}."
                     )
 
         # --- Find the centroid ---
