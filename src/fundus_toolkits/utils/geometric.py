@@ -561,6 +561,27 @@ class Point(NamedTuple):
         """
         return Point(-self.x, self.y)
 
+    def rotate(self, angle: float, degrees: bool = False) -> Point:
+        """Rotate the point by a given angle in radians counter-clockwise
+
+        Parameters
+        ----------
+        angle: float
+            The angle in radians
+
+        Returns
+        -------
+        Point
+            The rotated point
+        """
+        angle = math.radians(angle) if degrees else angle
+        cos_a = math.cos(angle)
+        sin_a = math.sin(angle)
+        return Point(
+            self.y * cos_a - self.x * sin_a,
+            self.y * sin_a + self.x * cos_a,
+        )
+
 
 ABSENT = Point(float("nan"), float("nan"))
 
