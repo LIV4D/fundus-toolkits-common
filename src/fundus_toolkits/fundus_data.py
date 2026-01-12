@@ -466,6 +466,7 @@ class FundusData:
         target_shape: Optional[Tuple[int, int]] = None,
         reshape_method: ReshapeMethods = ReshapeMethod.RAISE,
         invert_av: bool = False,
+        ensure_valid_av: bool = False,
     ) -> npt.NDArray[np.uint8]:
         """Load the arteries and veins map.
 
@@ -489,6 +490,9 @@ class FundusData:
 
         invert_av : bool, optional
             If True, the red channel is interpreted as the vein and the blue channel as the artery.
+
+        ensure_valid_av : bool, optional
+            If True, ensure that the loaded arteries and veins map contains at least one artery and one vein and raise an error otherwise.
 
         Returns
         -------
@@ -536,12 +540,17 @@ class FundusData:
                 av_ = av_map
         elif av_.ndim == 2:
             if av_.dtype == bool:
+                if ensure_valid_av:
+                    raise ValueError("The provided map is a binary image, which is not a valid arteries/veins map.")
                 av_ = (av_ * AVLabel.UNK).astype(np.uint8)
             elif np.issubdtype(av_.dtype, np.integer):
                 assert av_.min() >= 0 and av_.max() <= AVLabel.UNK, "Invalid vessels map"
                 av_ = av_.astype(np.uint8)
             else:
                 raise ValueError("The vessels map must be a binary image or a label map using the AVLabel convention.")
+        if ensure_valid_av:
+            if not np.all(np.isin([AVLabel.BKG, AVLabel.ART, AVLabel.VEI], av_)):
+                raise ValueError("The provided arteries/veins map does not contain at least one artery and one vein.")
 
         # --- Resize the image ---
         if target_shape is not None and av_.shape != target_shape:
@@ -731,6 +740,10 @@ class FundusData:
         if self._od is None:
             raise AttributeError("The optic disc segmentation was not provided.")
         return self._od
+
+    @property
+    def has_od_center(self) -> bool:
+        return self._od_center is not None
 
     @property
     def od_center(self) -> Optional[Point]:
