@@ -196,6 +196,9 @@ class Rect(NamedTuple):
         dst = inter.translate(-dst.y, -dst.x)
         return src.slice(), dst.slice()
 
+    def exclude_bottom_right_edges(self) -> Rect:
+        return Rect(self.h - 1, self.w - 1, self.y, self.x)
+
     @classmethod
     def is_rect(cls, r) -> TypeGuard[Rect]:
         return isinstance(r, Rect) or (isinstance(r, tuple) and len(r) == 4)
