@@ -262,12 +262,44 @@ class Rect(NamedTuple):
             fx = fy
         return Rect(self.h * fy, self.w * fx, self.y * fy, self.x * fx)
 
-    def clip(self, rect: float | Tuple[float, float] | Tuple[float, float, float, float]) -> Rect:
-        rect = Rect.from_tuple(rect)
-        return Rect.from_points(
-            (max(self.top, rect.top), max(self.left, rect.left)),
-            (min(self.bottom, rect.bottom), min(self.right, rect.right)),
-            ensure_positive=True,
+    @overload
+    def clip(self, points: Point | Tuple[float, float]) -> Point: ...
+    @overload
+    def clip(self, points: npt.NDArray[float]) -> npt.NDArray[np.float_]: ...
+    def clip(self, points: Point | Tuple[float, float] | npt.NDArray[float]) -> Rect | npt.NDArray[np.float_]:
+        """Clip a point or an array of points to the rectangle
+
+        Parameters
+        ----------
+        points : Point | Tuple[float, float] | npt.NDArray[float]
+            The point or array of points to clip
+
+        Returns
+        -------
+        Rect | npt.NDArray[np.float_]
+            The clipped point or array of points
+
+        Raises
+        ------
+        TypeError
+            If the input is not a Point, a tuple of 2 floats or an array of points
+        """
+        if isinstance(points, np.ndarray):
+            is_single = points.ndim == 1
+            if is_single:
+                points = points[np.newaxis, :]
+            assert points.ndim == 2 and points.shape[-1] == 2, "Array must have shape (n, 2)"
+            clipped = np.empty_like(points)
+            clipped[..., 0] = np.clip(points[..., 0], self.top, self.bottom)
+            clipped[..., 1] = np.clip(points[..., 1], self.left, self.right)
+            return clipped
+        elif isinstance(points, tuple) and len(points) == 2:
+            points = Point.from_tuple(points)
+        elif not isinstance(points, Point):
+            raise TypeError("Rect can only be used to clip a Point or an array of Points")
+        return Point(
+            min(max(points.y, self.top), self.bottom),
+            min(max(points.x, self.left), self.right),
         )
 
     def clip_to_size(self, shape: Tuple[float, float], center: Optional[Tuple[float, float]] = None):
@@ -360,14 +392,14 @@ class Rect(NamedTuple):
             raise TypeError("Rect can only be compared with a Point, a Rect or an array of Points or Rects")
 
     @staticmethod
-    def union(*rects: Tuple[Iterable[Rect] | Rect, ...]) -> Rect:
+    def union(*rects: Iterable[Rect] | Rect) -> Rect:
         if not rects:
             return Rect.empty()
         r = sum(((r,) if isinstance(r, Rect) else tuple(r) for r in rects), ())
         return reduce(lambda a, b: a | b, r)  # type: ignore
 
     @staticmethod
-    def intersection(*rects: Tuple[Iterable[Rect] | Rect, ...]) -> Rect:
+    def intersection(*rects: Iterable[Rect] | Rect) -> Rect:
         """Compute the intersection of a list of rectangles.
         If the intersection is empty, return an empty rectangle.
 
