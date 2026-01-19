@@ -526,6 +526,9 @@ class Point(NamedTuple):
     def to_int(self) -> Point:
         return Point(int(round(self.y)), int(round(self.x)))
 
+    def to_int_pair(self) -> Tuple[int, int]:
+        return int(round(self.y)), int(round(self.x))
+
     def ceil(self) -> Point:
         return Point(int(math.ceil(self.y)), int(math.ceil(self.x)))
 
