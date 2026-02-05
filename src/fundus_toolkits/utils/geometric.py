@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import math
 from functools import reduce
-from typing import Iterable, List, NamedTuple, Optional, Tuple, TypeGuard, overload
+from types import EllipsisType
+from typing import Iterable, List, Literal, NamedTuple, Optional, TypeGuard, overload
 
 import numpy as np
 import numpy.typing as npt
@@ -55,14 +56,14 @@ class Rect(NamedTuple):
         return Point(y=self.h, x=self.w)
 
     @property
-    def shape(self) -> Tuple[int, int]:
+    def shape(self) -> tuple[int, int]:
         return int(math.ceil(self.h)), int(math.ceil(self.w))
 
     @property
     def area(self) -> float:
         return self.h * self.w
 
-    def corners(self) -> Tuple[Point, Point, Point, Point]:
+    def corners(self) -> tuple[Point, Point, Point, Point]:
         return self.top_left, self.top_right, self.bottom_right, self.bottom_left
 
     def to_int(self):
@@ -73,9 +74,9 @@ class Rect(NamedTuple):
         cls,
         rect: float
         | int
-        | Tuple[float | int]
-        | Tuple[float | int, float | int]
-        | Tuple[float | int, float | int, float | int, float | int],
+        | tuple[float | int]
+        | tuple[float | int, float | int]
+        | tuple[float | int, float | int, float | int, float | int],
     ):
         if np.isscalar(rect):
             if np.issubdtype(type(rect), np.integer):
@@ -89,12 +90,12 @@ class Rect(NamedTuple):
         return cls(*rect)
 
     @classmethod
-    def from_size(cls, shape: Tuple[float | int, float | int]):
+    def from_size(cls, shape: tuple[float | int, float | int]):
         return cls(shape[0], shape[1])
 
     @overload
     @classmethod
-    def from_points(cls, bottom_right: Tuple[float | int, float | int], /) -> Rect: ...
+    def from_points(cls, bottom_right: tuple[float | int, float | int], /) -> Rect: ...
     @overload
     @classmethod
     def from_points(cls, bottom: float | int, right: float | int, /) -> Rect: ...
@@ -102,8 +103,8 @@ class Rect(NamedTuple):
     @classmethod
     def from_points(
         cls,
-        top_left: Tuple[float | int, float | int],
-        bottom_right: Tuple[float | int, float | int],
+        top_left: tuple[float | int, float | int],
+        bottom_right: tuple[float | int, float | int],
         /,
         *,
         ensure_positive: bool = False,
@@ -124,7 +125,7 @@ class Rect(NamedTuple):
     @classmethod
     def from_points(
         cls,
-        top_left_bottom_right: Tuple[float | int, float | int, float | int, float | int],
+        top_left_bottom_right: tuple[float | int, float | int, float | int, float | int],
         /,
         *,
         ensure_positive: bool = False,
@@ -132,7 +133,7 @@ class Rect(NamedTuple):
     @classmethod
     def from_points(
         cls,
-        *p: float | int | Tuple[float | int, float | int] | Tuple[float | int, float | int, float | int, float | int],
+        *p: float | int | tuple[float | int, float | int] | tuple[float | int, float | int, float | int, float | int],
         ensure_positive: bool = False,
     ) -> Rect:
         match p:
@@ -161,7 +162,7 @@ class Rect(NamedTuple):
             return Rect.empty() if rect.h < 0 or rect.w < 0 else rect
 
     @classmethod
-    def from_center(cls, center: Tuple[float, float], shape: float | Tuple[float, float]) -> Rect:
+    def from_center(cls, center: tuple[float, float], shape: float | tuple[float, float]) -> Rect:
         if np.isscalar(shape):
             shape = (float(shape), float(shape))  # type: ignore[assignment]
         return cls(shape[0], shape[1], center[0] - shape[0] // 2, center[1] - shape[1] // 2)  # type: ignore[assignment]
@@ -189,12 +190,147 @@ class Rect(NamedTuple):
             rect = Rect(*rect)
         return isinstance(rect, tuple) and (rect.w == 0 or rect.h == 0)
 
-    def crop_pad(self, dst: Rect | Tuple[int, int]) -> Tuple[Tuple[slice, slice], Tuple[slice, slice]]:
-        dst = Rect.from_tuple(dst)
-        inter = self & dst
-        src = inter.translate(-self.y, -self.x)
-        dst = inter.translate(-dst.y, -dst.x)
-        return src.slice(), dst.slice()
+    @overload
+    def crop_pad_slices(
+        src,
+        dst: Optional[Rect | tuple[int, int]] = None,
+        *,
+        prefix_ellipsis: Literal[False] = False,
+        src_shape: Optional[tuple[int, int]] = None,
+        dst_shape: Optional[tuple[int, int]] = None,
+    ) -> tuple[tuple[slice, slice], tuple[slice, slice]]: ...
+    @overload
+    def crop_pad_slices(
+        src,
+        dst: Optional[Rect | tuple[int, int]] = None,
+        *,
+        prefix_ellipsis: Literal[True],
+        src_shape: Optional[tuple[int, int]] = None,
+        dst_shape: Optional[tuple[int, int]] = None,
+    ) -> tuple[tuple[EllipsisType, slice, slice], tuple[EllipsisType, slice, slice]]: ...
+    def crop_pad_slices(
+        src,
+        dst: Optional[Rect | tuple[int, int]] = None,
+        *,
+        prefix_ellipsis: bool = False,
+        src_shape: Optional[tuple[int, int]] = None,
+        dst_shape: Optional[tuple[int, int]] = None,
+    ) -> (
+        tuple[tuple[slice, slice], tuple[slice, slice]]
+        | tuple[tuple[EllipsisType, slice, slice], tuple[EllipsisType, slice, slice]]
+    ):
+        """Provide slices to crop/pad this rectangle to fit into the destination rectangle.
+
+        Parameters
+        ----------
+        dst : Rect | tuple[int, int] | None
+            The destination rectangle or shape (height, width). If None, use the shape of this rectangle.
+
+        Returns
+        -------
+        src: tuple[slice, slice]
+            The slices to crop this rectangle.
+
+        dst: tuple[slice, slice], optional
+            The slices to pad into the destination rectangle. If None, assume that the destination rectangle has its top left at (0, 0), and the same size as this rectangle.
+
+        prefix_ellipsis: bool, optional
+            If True, add an ellipsis at the beginning of the slices to support images with more than 2 dimensions.
+
+        src_shape: tuple[int, int], optional
+            The shape of the source image. If provided, the source rectangle will be clipped to this shape.
+
+        dst_shape: tuple[int, int], optional
+            The shape of the destination image. If provided, the destination rectangle will be clipped to this shape.
+
+        Raises
+        ------
+        TypeError
+            If the input is not a Rect or a tuple of 2 integers.
+        """
+        src_dy, src_dx = max(0, -src.top_left.y), max(0, -src.top_left.x)
+
+        if dst is None:
+            h, w = src.h - src_dy, src.w - src_dx
+            if src_shape is not None:
+                h, w = h - max(0, src.bottom - src_shape[0]), w - max(0, src.right - src_shape[1])
+
+            src = Rect(h, w, src.y + src_dy, src.x + src_dx)
+            dst = Rect(h, w, src_dy, src_dx)
+        else:
+            dst = Rect.from_tuple(dst)
+            assert dst.size == src.size, "Source and destination rectangles must have the same size"
+
+            dy, dx = max(-dst.top_left.y, src_dy), max(-dst.top_left.x, src_dx)
+
+            dh, dw = 0, 0
+            if src_shape is not None:
+                dh, dw = max(dh, src.bottom - src_shape[0]), max(dw, src.right - src_shape[1])
+            if dst_shape is not None:
+                dh, dw = max(dh, dst.bottom - dst_shape[0]), max(dw, dst.right - dst_shape[1])
+
+            h, w = src.h - dy - dh, src.w - dx - dw
+            src = Rect(h, w, src.y + dy, src.x + dx)
+            dst = Rect(h, w, dst.y + dy, dst.x + dx)
+
+        src_slice, dst_slice = src.slice(), dst.slice()
+        if prefix_ellipsis:
+            return (Ellipsis, src_slice[0], src_slice[1]), (Ellipsis, dst_slice[0], dst_slice[1])
+        return src_slice, dst_slice
+
+    def crop_pad_image[T: np.generic](
+        self,
+        image: npt.NDArray[T],
+        dst: Optional[Rect | tuple[int, int]] = None,
+        dst_shape: Optional[tuple[int, int]] = None,
+        *,
+        channel_last: bool = False,
+    ) -> npt.NDArray[T]:
+        """Crop/pad an image to fit into the destination rectangle.
+
+        Parameters
+        ----------
+        image : npt.NDArray[T]
+            The image to crop/pad with shape [..., height, width].
+
+        dst : Rect | tuple[int, int] | None
+            The destination rectangle or shape (height, width). If None, use the shape of this rectangle.
+
+        dst_shape : tuple[int, int], optional
+            The shape of the destination image. If provided, the destination rectangle will be clipped to this shape.
+
+        channel_last : bool, optional
+            If True, the input image should have shape [height, width, C] and the output image will have shape [height, width, C].
+
+        Returns
+        -------
+        npt.NDArray[T]
+            The cropped/padded image.
+
+        Raises
+        ------
+        TypeError
+            If the input is not a Rect or a tuple of 2 integers.
+        """
+        if channel_last and image.ndim == 3:
+            image = image.transpose(2, 0, 1)
+        src_slice, dst_slice = self.crop_pad_slices(
+            dst, src_shape=image.shape[-2:], dst_shape=dst_shape, prefix_ellipsis=True
+        )
+
+        if dst_shape is None:
+            if dst is None:
+                dst_shape = self.shape
+            else:
+                if not isinstance(dst, Rect):
+                    dst = Rect.from_tuple(dst)
+                dst_shape = dst.shape
+
+        dst_image = np.zeros(image.shape[:-2] + dst_shape, dtype=image.dtype)
+        dst_image[dst_slice] = image[src_slice]
+        if channel_last and dst_image.ndim == 3:
+            dst_image = dst_image.transpose(1, 2, 0)
+        return dst_image
 
     def exclude_bottom_right_edges(self) -> Rect:
         return Rect(self.h - 1, self.w - 1, self.y, self.x)
@@ -263,15 +399,15 @@ class Rect(NamedTuple):
         return Rect(self.h * fy, self.w * fx, self.y * fy, self.x * fx)
 
     @overload
-    def clip(self, points: Point | Tuple[float, float]) -> Point: ...
+    def clip(self, points: Point | tuple[float, float]) -> Point: ...
     @overload
     def clip(self, points: npt.NDArray[float]) -> npt.NDArray[np.float_]: ...
-    def clip(self, points: Point | Tuple[float, float] | npt.NDArray[float]) -> Rect | npt.NDArray[np.float_]:
+    def clip(self, points: Point | tuple[float, float] | npt.NDArray[float]) -> Rect | npt.NDArray[np.float_]:
         """Clip a point or an array of points to the rectangle
 
         Parameters
         ----------
-        points : Point | Tuple[float, float] | npt.NDArray[float]
+        points : Point | tuple[float, float] | npt.NDArray[float]
             The point or array of points to clip
 
         Returns
@@ -302,7 +438,7 @@ class Rect(NamedTuple):
             min(max(points.x, self.left), self.right),
         )
 
-    def clip_to_size(self, shape: Tuple[float, float], center: Optional[Tuple[float, float]] = None):
+    def clip_to_size(self, shape: tuple[float, float], center: Optional[tuple[float, float]] = None):
         if center is None:
             center = self.center
         h, w = self.shape
@@ -316,12 +452,12 @@ class Rect(NamedTuple):
         return Rect.from_points((y0, x0), (y0 + min(h, H), x0 + min(w, W)))
 
     @overload
-    def pad(self, pad: float | Tuple[float, float], /) -> Rect: ...
+    def pad(self, pad: float | tuple[float, float], /) -> Rect: ...
     @overload
     def pad(self, vertical: float, horizontal: float, /) -> Rect: ...
     @overload
     def pad(self, top: float, right: float, bottom: float, left: float, /) -> Rect: ...
-    def pad(self, *pad: float | Tuple[float, float]) -> Rect:
+    def pad(self, *pad: float | tuple[float, float]) -> Rect:
         if len(pad) == 1 and np.isscalar(pad[0]):
             p = float(pad[0])  # type: ignore[assignment]
             pad = (p, p, p, p)
@@ -347,10 +483,10 @@ class Rect(NamedTuple):
 
         return Rect(self.h + pad[0] + pad[2], self.w + pad[1] + pad[3], self.y - pad[0], self.x - pad[3])
 
-    def box(self) -> Tuple[float, float, float, float]:
+    def box(self) -> tuple[float, float, float, float]:
         return self.left, self.top, self.right, self.bottom
 
-    def slice(self) -> Tuple[slice, slice]:
+    def slice(self) -> tuple[slice, slice]:
         r = self.to_int()
         y, x = int(r.y), int(r.x)
         h, w = int(r.h), int(r.w)
@@ -438,47 +574,47 @@ class Point(NamedTuple):
     def xy(self) -> tuple[float, float]:
         return self.x, self.y
 
-    def __add__(self, other: Tuple[float, float] | float) -> Point:  # type: ignore[override]
+    def __add__(self, other: tuple[float, float] | float) -> Point:  # type: ignore[override]
         if np.isscalar(other):
             other = float(other)  # type: ignore[assignment]
             return Point(self.y + other, self.x + other)
         y, x = other  # type: ignore[assignment]
         return Point(float(self.y + y), float(self.x + x))
 
-    def __radd__(self, other: Tuple[float, float] | float) -> Point:
+    def __radd__(self, other: tuple[float, float] | float) -> Point:
         return self + other
 
-    def __sub__(self, other: Tuple[float, float] | float) -> Point:  # type: ignore[override]
+    def __sub__(self, other: tuple[float, float] | float) -> Point:  # type: ignore[override]
         if np.isscalar(other):
             other = float(other)  # type: ignore[assignment]
             return Point(self.y - other, self.x - other)
         y, x = other  # type: ignore[assignment]
         return Point(float(self.y - y), float(self.x - x))
 
-    def __rsub__(self, other: Tuple[float, float] | float):
+    def __rsub__(self, other: tuple[float, float] | float):
         return -(self - other)
 
     def __neg__(self) -> Point:  # type: ignore[override]
         return Point(-self.y, -self.x)
 
-    def __mul__(self, other: Tuple[float, float] | float) -> Point:  # type: ignore[override]
+    def __mul__(self, other: tuple[float, float] | float) -> Point:  # type: ignore[override]
         if np.isscalar(other):
             other = float(other)  # type: ignore[assignment]
             return Point(self.y * other, self.x * other)
         y, x = other  # type: ignore[assignment]
         return Point(self.y * float(y), self.x * float(x))
 
-    def __rmul__(self, other: Tuple[float, float] | float) -> Point:  # type: ignore[override]
+    def __rmul__(self, other: tuple[float, float] | float) -> Point:  # type: ignore[override]
         return self * other
 
-    def __truediv__(self, other: Tuple[float, float] | float) -> Point:  # type: ignore[override]
+    def __truediv__(self, other: tuple[float, float] | float) -> Point:  # type: ignore[override]
         if np.isscalar(other):
             other = float(other)  # type: ignore[assignment]
             return Point(self.y / other, self.x / other)
         y, x = other  # type: ignore[assignment]
         return Point(self.y / float(y), self.x / float(x))
 
-    def __rtruediv__(self, other: Tuple[float, float] | float):
+    def __rtruediv__(self, other: tuple[float, float] | float):
         if np.isscalar(other):
             other = float(other)  # type: ignore[assignment]
             return Point(other / self.y, other / self.x)
@@ -490,7 +626,7 @@ class Point(NamedTuple):
         return cls(0, 0)
 
     @classmethod
-    def from_tuple(cls, point: float | int | Tuple[float | int, float | int]):
+    def from_tuple(cls, point: float | int | tuple[float | int, float | int]):
         if np.isscalar(point):
             p = float(point)  # type: ignore[assignment]
             return cls(p, p)
@@ -526,7 +662,7 @@ class Point(NamedTuple):
     def to_int(self) -> Point:
         return Point(int(round(self.y)), int(round(self.x)))
 
-    def to_int_pair(self) -> Tuple[int, int]:
+    def to_int_pair(self) -> tuple[int, int]:
         return int(round(self.y)), int(round(self.x))
 
     def ceil(self) -> Point:
@@ -535,7 +671,7 @@ class Point(NamedTuple):
     def floor(self) -> Point:
         return Point(int(math.floor(self.y)), int(math.floor(self.x)))
 
-    def clip(self, rect: float | Tuple[float, float] | Tuple[float, float, float, float]) -> Point:
+    def clip(self, rect: float | tuple[float, float] | tuple[float, float, float, float]) -> Point:
         rect = Rect.from_tuple(rect)
         return Point(
             min(max(self.y, rect.top), rect.bottom),

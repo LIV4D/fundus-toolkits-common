@@ -4,6 +4,7 @@ import typing
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Optional, Tuple, TypeVar, overload
+import warnings
 
 import numpy as np
 import numpy.typing as npt
@@ -161,7 +162,7 @@ def write_image(
     path: PathLike,
     *,
     default_filename: Optional[str] = None,
-    on_exists: Literal["raise", "overwrite", "ignore"] = "raise",
+    on_exists: Literal["raise", "warn", "skip", "overwrite"] = "raise",
 ) -> None:
     """Write an image to a file.
 
@@ -178,11 +179,12 @@ def write_image(
 
         Default: None.
 
-    on_exists : Literal["overwrite", "ignore", "raise"], optional
+    on_exists : Literal["raise", "warn", "skip", "overwrite"] = "raise", optional
         What to do if the output file already exists:
         - "raise": raise an error.
-        - "overwrite": overwrite the existing file;
-        - "ignore": do nothing;
+        - "warn": issue a warning and do nothing.
+        - "skip": do nothing.
+        - "overwrite": overwrite the existing file.
     """
     from .safe_import import import_cv2, is_cv2_available
 
@@ -192,14 +194,14 @@ def write_image(
     img = typing.cast(npt.NDArray, img)
 
     if img.ndim == 3 and img.shape[2] not in {1, 3, 4} and img.shape[0] in {1, 3, 4}:
-        img = np.transpose(img, (2, 0, 1))  # CHW to HWC
+        img = np.transpose(img, (1, 2, 0))  # CHW to HWC
     if (np.issubdtype(img.dtype, np.floating) and (img.max() <= 1.0 and img.min() >= 0.0)) or img.dtype == np.bool_:
         img = img * 255
     img = img.astype(np.uint8)
 
     # -- Ensure path exist --
     path = Path(path)
-    if path.is_dir():
+    if len(path.suffix) == 0:  # No suffix, treat as directory
         if default_filename is None:
             raise ValueError(f"Output path {path} is a directory, but no default filename was provided.")
         path = path / default_filename
@@ -208,7 +210,10 @@ def write_image(
         match on_exists:
             case "raise":
                 raise FileExistsError(f"Output file {path} already exists.")
-            case "ignore":
+            case "warn":
+                warnings.warn(f"Output file {path} already exists.", stacklevel=2)
+                return
+            case "skip":
                 return
             case "overwrite":
                 pass
@@ -346,8 +351,10 @@ def label_map_to_rgb(
     else:
         raise ValueError(f"Invalid colors type: {type(colors)}")
 
+    img_ = img.transpose((*range(label_map.ndim - 3), label_map.ndim - 1, label_map.ndim, label_map.ndim - 2))
     for label, color in colors_dict.items():
-        img[label_map == label] = color
+        img_[label_map == label] = color
+    img = img_.transpose((*range(label_map.ndim - 3), label_map.ndim, label_map.ndim - 2, label_map.ndim - 1))
 
     return img
 

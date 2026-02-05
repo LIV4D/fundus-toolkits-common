@@ -6,7 +6,7 @@ from copy import copy
 from enum import Enum, IntEnum
 from pathlib import Path
 from types import EllipsisType
-from typing import TYPE_CHECKING, Literal, Optional, Self, Tuple, TypeAlias, overload
+from typing import TYPE_CHECKING, Literal, Optional, Self, Tuple, TypeAlias, TypedDict, overload
 
 import numpy as np
 import numpy.typing as npt
@@ -122,10 +122,25 @@ class FundusData:
         reshape_method: ReshapeMethods = ReshapeMethod.RAISE,
         immutable: bool = False,
     ):
+        if name is None:
+            if isinstance(image, (str, Path)):
+                name = Path(image).stem
+            elif isinstance(vessels, (str, Path)):
+                name = Path(vessels).stem
+            elif isinstance(av, (str, Path)):
+                name = Path(av).stem
+            elif isinstance(od, (str, Path)):
+                name = Path(od).stem
+            elif isinstance(macula, (str, Path)):
+                name = Path(macula).stem
+        self._name = name
+
         shape: Optional[Tuple[int, int]] = target_shape
         if image is not None:
             if check_validity:
                 image = self.load_fundus_image(image, target_shape, reshape_method=reshape_method)
+            else:
+                assert isinstance(image, np.ndarray), "The image must be a numpy array."
             self._image = image
             if shape is None:
                 shape = self._image.shape[-2:]  # type: ignore[assignment]
@@ -137,6 +152,8 @@ class FundusData:
                 roi_mask = self.load_fundus_mask(
                     roi_mask, from_fundus=False, target_shape=shape, reshape_method=reshape_method
                 )
+            else:
+                assert isinstance(roi_mask, np.ndarray), "The fundus mask must be a numpy array."
             self._roi_mask = roi_mask
             if shape is None:
                 shape = roi_mask.shape[-2:]  # type: ignore[assignment]
@@ -146,6 +163,8 @@ class FundusData:
         if vessels is not None:
             if check_validity:
                 vessels = self.load_vessels(vessels, target_shape=shape, reshape_method=reshape_method)
+            else:
+                assert isinstance(vessels, np.ndarray), "The vessels segmentation must be a numpy array."
             self._vessels = vessels
             if shape is None:
                 shape = vessels.shape[-2:]  # type: ignore[assignment]
@@ -156,6 +175,8 @@ class FundusData:
         if av is not None:
             if check_validity:
                 av = self.load_av(av, target_shape=shape, reshape_method=reshape_method)
+            else:
+                assert isinstance(av, np.ndarray), "The artery/vein segmentation must be a numpy array."
             self._av = av
             if shape is None:
                 shape = av.shape[-2:]  # type: ignore[assignment]
@@ -170,6 +191,7 @@ class FundusData:
                 if shape is None:
                     shape = self._od.shape[-2:]  # type: ignore[assignment]
             else:
+                assert isinstance(od, np.ndarray), "The optic disc segmentation must be a numpy array."
                 self._od, self._od_center, self._od_size = od, od_center, od_size
         else:
             self._od, self._od_center, self._od_size = None, od_center, od_size
@@ -180,6 +202,7 @@ class FundusData:
                 if shape is None:
                     shape = self._macula.shape[-2:]  # type: ignore[assignment]
             else:
+                assert isinstance(macula, np.ndarray), "The macula segmentation must be a numpy array."
                 self._macula, self._macula_center = macula, macula_center
         else:
             self._macula, self._macula_center = None, macula_center
@@ -188,16 +211,6 @@ class FundusData:
             raise ValueError("No data was provided to initialize the FundusData.")
         self._shape = shape
 
-        if name is None:
-            if isinstance(image, (str, Path)):
-                name = Path(image).stem
-            elif isinstance(vessels, (str, Path)):
-                name = Path(vessels).stem
-            elif isinstance(od, (str, Path)):
-                name = Path(od).stem
-            elif isinstance(macula, (str, Path)):
-                name = Path(macula).stem
-        self._name = name
         self._immutable = immutable
 
     type Fields = Literal["image", "fundus_mask", "vessels", "av", "od", "macula"]
@@ -210,11 +223,51 @@ class FundusData:
         av: ImageSource | EllipsisType = ...,
         od: ImageSource | EllipsisType = ...,
         macula: ImageSource | EllipsisType = ...,
-        target_shape: Optional[Tuple[int, int]] = None,
-        reshape_method: ReshapeMethods = ReshapeMethod.RAISE,
         name: str | EllipsisType = ...,
+        *,
+        reshape_method: ReshapeMethods = ReshapeMethod.RAISE,
+        crop_pad: Optional[Rect] = None,
         inplace: bool = False,
     ) -> Self:
+        """Return a copy of this FundusData with updated fields. The fields that are not specified are kept unchanged.
+           The dimensions of the updated fields are checked to match the dimensions of the current FundusData and `reshape_method` is used to resolve any mismatch.
+
+        Parameters
+        ----------
+        image : ImageSource | EllipsisType, optional
+            If specified, update the fundus image.
+        roi_mask : ImageSource | EllipsisType, optional
+            If specified, update the fundus mask.
+        vessels : ImageSource | EllipsisType, optional
+            If specified, update the vessels image.
+        av : ImageSource | EllipsisType, optional
+            If specified, update the artery/vein segmentation image.
+        od : ImageSource | EllipsisType, optional
+            If specified, update the optic disc image.
+        macula : ImageSource | EllipsisType, optional
+            If specified, update the macula image.
+        name : str | EllipsisType, optional
+            If specified, update the name of the FundusData.
+        reshape_method : ReshapeMethods, optional
+            The method to use for reshaping the images. Options are:
+            - "resize": resize the image to the target shape.
+            - "crop": crop or pad the image to the target shape.
+            - "raise": (by default) raise an error if the shape is different from the target shape.
+        crop_pad : Optional[Rect], optional
+            If specified, crop or pad the images to the given rectangle before resizing.
+        inplace : bool, optional
+            If True, update this FundusData in place and return it. Otherwise, return a new FundusData with the updated fields.
+
+        Returns
+        -------
+        Self
+            A copy of this FundusData with the updated fields.
+
+        Raises
+        ------
+        RuntimeError
+            If inplace is True and this FundusData is immutable.
+        """
         if inplace:
             if self._immutable:
                 raise RuntimeError("This FundusData instance is immutable.")
@@ -222,24 +275,26 @@ class FundusData:
         else:
             other = copy(self)
 
-        shape = self.shape if target_shape is None else target_shape
+        class ShapeOpts(TypedDict):
+            crop_pad: Optional[Rect]
+            reshape_method: ReshapeMethods
+            target_shape: Tuple[int, int]
+
+        shape_opts = ShapeOpts(crop_pad=crop_pad, reshape_method=reshape_method, target_shape=self.shape)
+
         if image is not ...:
-            other._image = other.load_fundus_image(image, target_shape=shape, reshape_method=reshape_method)
+            other._image = other.load_fundus_image(image, **shape_opts)
         if roi_mask is not ...:
-            other._roi_mask = other.load_fundus_mask(roi_mask, target_shape=shape, reshape_method=reshape_method)
+            other._roi_mask = other.load_fundus_mask(roi_mask, **shape_opts)
         if vessels is not ...:
-            other._vessels = other.load_vessels(vessels, target_shape=shape, reshape_method=reshape_method)
+            other._vessels = other.load_vessels(vessels, **shape_opts)
         if av is not ...:
-            other._av = other.load_av(av, target_shape=shape, reshape_method=reshape_method)
+            other._av = other.load_av(av, **shape_opts)
 
         if od is not ...:
-            other._od, other._od_center, other._od_size = other.load_od_macula(
-                od, target_shape=shape, reshape_method=reshape_method, fit_ellipse=True
-            )
+            other._od, other._od_center, other._od_size = other.load_od_macula(od, **shape_opts, fit_ellipse=True)
         if macula is not ...:
-            other._macula, other._macula_center = other.load_od_macula(
-                macula, target_shape=shape, reshape_method=reshape_method
-            )
+            other._macula, other._macula_center = other.load_od_macula(macula, **shape_opts)
         if name is not ...:
             other._name = name
         return other
@@ -311,6 +366,7 @@ class FundusData:
         fundus: ImageSource,
         target_shape: Optional[Tuple[int, int]] = None,
         reshape_method: ReshapeMethods = ReshapeMethod.RAISE,
+        crop_pad: Optional[Rect] = None,
     ) -> npt.NDArray[np.float32]:
         """Load a fundus image from various sources.
         The image is converted to a numpy array of type float32, with channel first (3, H, W) and values in [0, 1].
@@ -324,12 +380,17 @@ class FundusData:
         target_shape : Optional[Tuple[int, int]], optional
             The target shape of the image, by default None
         reshape_method : ReshapeMethods, optional
-            The method to use for reshaping the image, by default ReshapeMethod.RAISE. If target_shape is None, this parameter is ignored.
+            The method to use to resolve shape mismatches between the image and the target shape:
+            - "resize": resize the image to the target shape.
+            - "crop_pad": crop or pad the image to the target shape.
+            - "raise": (by default) raise an error if the shape is different from the target shape.
+        crop_pad : Optional[Rect], optional
+            If specified, crop or pad the image to the given rectangle before resizing, by default None.
 
         Returns
         -------
         npt.NDArray[np.float32]
-            The loaded fundus image as a numpy array.
+            The loaded fundus image as a numpy array of shape (3, H, W) and type float32.
 
         Raises
         ------
@@ -358,6 +419,10 @@ class FundusData:
         if fundus_.dtype != np.float32:
             fundus_ = fundus_.astype(np.float32)
 
+        # --- Extract ROI ---
+        if crop_pad is not None:
+            fundus_ = crop_pad.crop_pad_image(fundus_)
+
         # -- Resize the image ---
         if target_shape is not None and target_shape != fundus_.shape[-2:]:
             match ReshapeMethod.parse(reshape_method):
@@ -378,12 +443,33 @@ class FundusData:
         from_fundus: bool = False,
         target_shape: Optional[Tuple[int, int]] = None,
         reshape_method: ReshapeMethods = ReshapeMethod.RAISE,
+        crop_pad: Optional[Rect] = None,
     ) -> npt.NDArray[np.bool_]:
+        """Load a fundus mask from various sources.
+
+        Parameters
+        ----------
+        fundus_mask : ImageSource
+            The fundus mask or fundus image. It must be one of:
+            - A path to an image file containing the fundus mask or fundus image.
+            - A numpy array (or torch Tensor) of shape (H, W) containing the fundus mask or of shape (H, W, 3) or (3, H, W) containing the fundus image.
+        from_fundus : bool, optional
+            If True, compute the fundus mask from the fundus image, by default False.
+        target_shape : Optional[Tuple[int, int]], optional
+            The target shape of the image, by default None.
+        reshape_method : ReshapeMethods, optional
+            The method to use to resolve shape mismatches between the image and the target shape:
+            - "resize": resize the image to the target shape.
+            - "crop_pad": crop or pad the image to the target shape.
+            - "raise": (by default) raise an error if the shape is different from the target shape.
+        crop_pad : Optional[Rect], optional
+            If specified, crop or pad the image to the given rectangle before resizing, by default None.
+        """
         if from_fundus:
             # --- Compute from fundus mask ---
             from .utils.fundus import fundus_ROI
 
-            fundus = cls.load_fundus_image(fundus_mask, target_shape, reshape_method=reshape_method)
+            fundus = cls.load_fundus_image(fundus_mask, target_shape, reshape_method=reshape_method, crop_pad=crop_pad)
             fundus_mask_ = fundus_ROI(fundus)  # Compute the fundus mask from the fundus image
         else:
             # --- Load the image ---
@@ -399,6 +485,9 @@ class FundusData:
             # --- Check image ---
             if fundus_mask_.ndim != 2:
                 raise ValueError("Invalid fundus mask")
+
+            if crop_pad is not None:
+                fundus_mask_ = crop_pad.crop_pad_image(fundus_mask_)
 
             if fundus_mask_.dtype != bool:
                 fundus_mask_ = fundus_mask_ > 127 if fundus_mask_.dtype == np.uint8 else fundus_mask_ > 0.5
@@ -422,7 +511,30 @@ class FundusData:
         vessels: ImageSource,
         target_shape: Optional[Tuple[int, int]] = None,
         reshape_method: ReshapeMethods = ReshapeMethod.RAISE,
+        crop_pad: Optional[Rect] = None,
     ) -> npt.NDArray[np.bool_]:
+        """Load a vessels segmentation.
+
+        Parameters
+        ----------
+        vessels : ImageSource
+            The vessels segmentation. It must be one of:
+            - A path to an image file containing the vessels segmentation.
+            - A numpy array (or torch Tensor) of shape (H, W) containing the vessels segmentation.
+        target_shape : Optional[Tuple[int, int]], optional
+            The target shape of the image, by default None.
+        reshape_method : ReshapeMethods, optional
+            The method to use to resolve shape mismatches between the image and the target shape:
+            - "resize": resize the image to the target shape.
+            - "crop_pad": crop or pad the image to the target shape.
+            - "raise": (by default) raise an error if the shape is different from the target shape.
+        crop_pad : Optional[Rect], optional
+            If specified, crop or pad the image to the given rectangle before resizing, by default None.
+        Returns
+        -------
+        npt.NDArray[np.bool_]
+            The loaded vessels segmentation as a binary numpy array.
+        """  # noqa: E501
         # --- Load the image ---
         if isinstance(vessels, (str, Path)):
             vessels_ = read_image(vessels, cast_to_float=False)
@@ -465,6 +577,8 @@ class FundusData:
         av: ImageSource,
         target_shape: Optional[Tuple[int, int]] = None,
         reshape_method: ReshapeMethods = ReshapeMethod.RAISE,
+        crop_pad: Optional[Rect] = None,
+        *,
         invert_av: bool = False,
         ensure_valid_av: bool = False,
     ) -> npt.NDArray[np.uint8]:
@@ -480,13 +594,16 @@ class FundusData:
             - A numpy array of shape (H, W) containing the arteries and veins map using the `AVLabel` convention.
 
         target_shape : Tuple[int, int], optional
-            The target shape of the image, by default None.<
+            The target shape of the image, by default None.
 
         reshape_method : ShapeResolve, optional
             The method used when the shape of the image is different from the target shape:
             - "resize": resize the image to the target shape.
             - "crop_pad": crop or pad the image to the target shape.
             - "raise": (by default) raise an error if the shape is different from the target shape.
+
+        crop_pad : Optional[Rect], optional
+            If specified, crop or pad the image to the given rectangle before resizing, by default None.
 
         invert_av : bool, optional
             If True, the red channel is interpreted as the vein and the blue channel as the artery.
@@ -552,6 +669,10 @@ class FundusData:
             if not np.all(np.isin([AVLabel.BKG, AVLabel.ART, AVLabel.VEI], av_)):
                 raise ValueError("The provided arteries/veins map does not contain at least one artery and one vein.")
 
+        # --- Crop/PAD ---
+        if crop_pad is not None:
+            av_ = crop_pad.crop_pad_image(av_)
+
         # --- Resize the image ---
         if target_shape is not None and av_.shape != target_shape:
             match ReshapeMethod.parse(reshape_method):
@@ -575,8 +696,9 @@ class FundusData:
         cls,
         seg: ImageSource,
         target_shape: Optional[Tuple[int, int]] = None,
-        *,
         reshape_method: ReshapeMethods = ReshapeMethod.RAISE,
+        crop_pad: Optional[Rect] = None,
+        *,
         fit_ellipse: Literal[False] = False,
     ) -> Tuple[npt.NDArray[np.bool_], Point]: ...
     @overload
@@ -585,8 +707,9 @@ class FundusData:
         cls,
         seg: ImageSource,
         target_shape: Optional[Tuple[int, int]] = None,
-        *,
         reshape_method: ReshapeMethods = ReshapeMethod.RAISE,
+        crop_pad: Optional[Rect] = None,
+        *,
         fit_ellipse: Literal[True],
     ) -> Tuple[npt.NDArray[np.bool_], Point, Point]: ...
     @classmethod
@@ -594,10 +717,39 @@ class FundusData:
         cls,
         seg: ImageSource,
         target_shape: Optional[Tuple[int, int]] = None,
-        *,
         reshape_method: ReshapeMethods = ReshapeMethod.RAISE,
+        crop_pad: Optional[Rect] = None,
+        *,
         fit_ellipse: bool = False,
     ) -> Tuple[npt.NDArray[np.bool_], Point] | Tuple[npt.NDArray[np.bool_], Point, Point]:
+        """Load an optic disc or macula segmentation.
+        Parameters
+        ----------
+        seg : ImageSource
+            The optic disc or macula segmentation. It must be one of:
+            - A path to an image file containing the segmentation.
+            - A numpy array (or torch Tensor) of shape (H, W) containing the segmentation.
+        target_shape : Optional[Tuple[int, int]], optional
+            The target shape of the image, by default None.
+        reshape_method : ReshapeMethods, optional
+            The method to use to resolve shape mismatches between the image and the target shape:
+            - "resize": resize the image to the target shape.
+            - "crop_pad": crop or pad the image to the target shape.
+            - "raise": (by default) raise an error if the shape is different from the target shape.
+        crop_pad : Optional[Rect], optional
+            If specified, crop or pad the image to the given rectangle before resizing, by default None.
+        fit_ellipse : bool, optional
+            If True, fit an ellipse to the optic disc segmentation and return its size as well.
+        Returns
+        -------
+        binary_map : npt.NDArray[np.bool_]
+            The binary segmentation of the optic disc or macula.
+        center : Point
+            The center of the optic disc or macula.
+        size : Point, optional
+            If `fit_ellipse` is True, the size of the fitted ellipse (major_axis, minor_axis).
+        """  # noqa: E501
+
         # --- Load the image ---
         if isinstance(seg, (str, Path)):
             seg_ = read_image(seg, cast_to_float=False)
@@ -653,7 +805,7 @@ class FundusData:
 
     @property
     def image(self) -> npt.NDArray[np.float32]:
-        """The fundus image in RGB format. Values are float32 in the range [0, 1]."""
+        """The fundus image with shape (3, H, W) and in RGB format. Values are float32 in the range [0, 1]."""
         if self._image is None:
             raise AttributeError("The fundus image was not provided.")
         return self._image
@@ -674,7 +826,7 @@ class FundusData:
 
     @property
     def vessels(self) -> npt.NDArray[np.bool_]:
-        """The binary segmentation of the vessels.
+        """The binary segmentation of the vessels with shape (H, W).
 
         Raises
         ------
@@ -933,7 +1085,7 @@ class FundusData:
         vessels: Optional[PathLike] = None,
         av: Optional[PathLike] = None,
         *,
-        overwrite: bool = False,
+        on_exists: Literal["raise", "warn", "skip", "overwrite"] = "warn",
     ) -> None:
         """Save the fundus image and the provided segmentations to files.
 
@@ -951,14 +1103,13 @@ class FundusData:
         av : PathLike
             If provided, save the arteries and veins segmentation at the given path. If the path correspond to a directory, the segmentation is saved in a file named `<name>.png` in that directory.
 
-        overwrite : bool, optional
-            Whether to overwrite the files if they already exist, by default False.
+        on_exists : Literal["raise", "warn", "skip", "overwrite"] = "warn",
+            What to do if the output file already exists.
         Raises
         ------
         AttributeError
             If one of the requested data to save was not provided.
         """  # noqa: E501
-        on_exists = "overwrite" if overwrite else "ignore"
         if image is not None:
             write_image(self.image, image, default_filename=f"{self.name}.jpg", on_exists=on_exists)
         if od is not None:
@@ -1050,7 +1201,7 @@ class FundusData:
             other._macula = rotate(self._macula, angle)
         return other
 
-    def rescale(self, size: float | int | Tuple[int, int]) -> Self:
+    def resize(self, size: float | int | Tuple[int, int]) -> Self:
         """Rescale the fundus image and the vessels segmentation to a given size.
 
         Parameters
@@ -1098,7 +1249,13 @@ class FundusData:
             other._macula = resize(self._macula, shape, interpolation=True)
         return other
 
-    def crop_to_roi(self, *, pad: float = 0.01, ensure_square=True) -> Self:
+    @overload
+    def crop_to_roi(self, *, pad: float = 0.01, ensure_square=True, return_roi: Literal[False] = False) -> Self: ...
+    @overload
+    def crop_to_roi(self, *, pad: float = 0.01, ensure_square=True, return_roi: Literal[True]) -> Tuple[Self, Rect]: ...
+    def crop_to_roi(
+        self, *, pad: float = 0.01, ensure_square=True, return_roi: bool = False
+    ) -> Self | Tuple[Self, Rect]:
         """Crop all data to the bounding box of the ROI mask.
 
         Parameters
@@ -1123,7 +1280,7 @@ class FundusData:
         if ensure_square:
             side = max(r.h, r.w)
             r = r.from_center(r.center, (side, side))
-        src, dst = Rect.from_size(self.shape).crop_pad(r)
+        src, dst = r.crop_pad_slices(src_shape=self.shape)
 
         def crop_pad_center(array: npt.NDArray) -> npt.NDArray:
             result = np.zeros(dtype=array.dtype, shape=array.shape[:-2] + r.shape)
@@ -1143,4 +1300,5 @@ class FundusData:
             updated_data["od"] = crop_pad_center(self._od)
         if self._macula is not None:
             updated_data["macula"] = crop_pad_center(self._macula)
-        return type(self)(**updated_data, name=self._name, immutable=self._immutable)
+        fundus = type(self)(**updated_data, name=self._name, immutable=self._immutable)
+        return (fundus, r) if return_roi else fundus
