@@ -332,6 +332,15 @@ class Rect(NamedTuple):
             dst_image = dst_image.transpose(1, 2, 0)
         return dst_image
 
+    def grid_indices(self) -> npt.NDArray[np.int_]:
+        """Get the grid indices of the rectangle as an array of shape (h, w, 2)"""
+        yy, xx = np.meshgrid(
+            np.arange(int(math.ceil(self.h))) + self.y,
+            np.arange(int(math.ceil(self.w))) + self.x,
+            indexing="ij",
+        )
+        return np.stack((yy, xx), axis=-1)
+
     def exclude_bottom_right_edges(self) -> Rect:
         return Rect(self.h - 1, self.w - 1, self.y, self.x)
 
