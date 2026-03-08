@@ -194,7 +194,9 @@ class FundusData:
                 assert isinstance(od, np.ndarray), "The optic disc segmentation must be a numpy array."
                 self._od, self._od_center, self._od_size = od, od_center, od_size
         else:
-            self._od, self._od_center, self._od_size = None, od_center, od_size
+            self._od = None
+            self._od_center = None if od_center is None else Point.parse(od_center)
+            self._od_size = None if od_size is None else Point.parse(od_size)
 
         if macula is not None:
             if check_validity:
@@ -205,7 +207,8 @@ class FundusData:
                 assert isinstance(macula, np.ndarray), "The macula segmentation must be a numpy array."
                 self._macula, self._macula_center = macula, macula_center
         else:
-            self._macula, self._macula_center = None, macula_center
+            self._macula = None
+            self._macula_center = None if macula_center is None else Point.parse(macula_center)
 
         if shape is None:
             raise ValueError("No data was provided to initialize the FundusData.")

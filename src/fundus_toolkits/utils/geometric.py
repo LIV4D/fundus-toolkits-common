@@ -647,6 +647,18 @@ class Point(NamedTuple):
     def from_array(cls, point: npt.NDArray[np.float_]) -> Point:
         return cls(float(point[0]), float(point[1]))
 
+    @classmethod
+    def parse(cls, s) -> Point:
+        if isinstance(s, str):
+            s = s.strip("()")
+            y_str, x_str = s.split(",")
+            return cls(float(y_str), float(x_str))
+        elif isinstance(s, tuple) and len(s) == 2 and all(np.isscalar(_) for _ in s):
+            return cls(float(s[0]), float(s[1]))  # type: ignore[assignment]
+        elif isinstance(s, np.ndarray) and s.shape == (2,):
+            return cls(float(s[0]), float(s[1]))
+        raise ValueError(f"Invalid point: {s}")
+
     def numpy(self) -> np.ndarray:
         return np.array(self)
 
