@@ -108,18 +108,21 @@ def read_image(
     from .image import resize as resize_image
     from .safe_import import import_cv2, is_cv2_available
 
-    if is_cv2_available():
-        cv2 = import_cv2()
-        img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
-        if img is None:
-            raise ValueError(f"Could not load image from {path}")
-        if img.ndim == 3:
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    else:
-        from PIL import Image
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*grfmt_tiff.*")
 
-        img = Image.open(path)
-        img = np.array(img, dtype=np.uint8)
+        if is_cv2_available():
+            cv2 = import_cv2()
+            img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+            if img is None:
+                raise ValueError(f"Could not load image from {path}")
+            if img.ndim == 3:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        else:
+            from PIL import Image
+
+            img = Image.open(path)
+            img = np.array(img, dtype=np.uint8)
 
     if img.ndim == 3:
         img = img.transpose((2, 0, 1))  # HWC to CHW
@@ -152,6 +155,28 @@ def read_label_image(
 ) -> npt.NDArray[np.uint8]:
     img = read_image(path, binarize=False, resize=resize, crop_pad=crop_pad, cast_to_float=False)
     return rgb_map_to_label(img, labels)
+
+
+def read_image_shape(path: PathLike) -> Tuple[int, int]:
+    """Get the shape of an image without loading it.
+
+    Parameters
+    ----------
+    path : PathLike
+        The path to the image file.
+
+    Returns
+    -------
+    Tuple[int, int]
+        The shape of the image as (height, width).
+    """
+
+    with warnings.catch_warnings():
+        from PIL import Image
+
+        warnings.filterwarnings("ignore", message=".*grfmt_tiff.*")
+        with Image.open(path) as img:
+            return img.size[1], img.size[0]
 
 
 ########################################################################################################################

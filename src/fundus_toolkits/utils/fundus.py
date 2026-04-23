@@ -107,7 +107,7 @@ def fundus_ROI(
     mask = mask > 125
 
     if check:
-        if mask.sum() < mask.size * 0.6:
+        if mask.sum() < min(mask.shape) ** 2 * 0.6:
             warnings.warn(
                 "The computed ROI mask is smaller than 60% of the image size and might be invalid.",
                 RuntimeWarning,

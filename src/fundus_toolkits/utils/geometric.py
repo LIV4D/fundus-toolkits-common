@@ -223,13 +223,8 @@ class Rect(NamedTuple):
 
         Parameters
         ----------
-        dst : Rect | tuple[int, int] | None
-            The destination rectangle or shape (height, width). If None, use the shape of this rectangle.
-
-        Returns
-        -------
-        src: tuple[slice, slice]
-            The slices to crop this rectangle.
+        src: Rect
+            The source rectangle to crop/pad.
 
         dst: tuple[slice, slice], optional
             The slices to pad into the destination rectangle. If None, assume that the destination rectangle has its top left at (0, 0), and the same size as this rectangle.
@@ -242,6 +237,10 @@ class Rect(NamedTuple):
 
         dst_shape: tuple[int, int], optional
             The shape of the destination image. If provided, the destination rectangle will be clipped to this shape.
+
+        Returns
+        -------
+
 
         Raises
         ------
@@ -630,6 +629,20 @@ class Point(NamedTuple):
         y, x = other  # type: ignore[assignment]
         return Point(float(y) / self.y, float(x) / self.x)
 
+    def __floordiv__(self, other):
+        if np.isscalar(other):
+            other = float(other)  # type: ignore[assignment]
+            return Point(self.y // other, self.x // other)
+        y, x = other  # type: ignore[assignment]
+        return Point(self.y // float(y), self.x // float(x))
+
+    def __rfloordiv__(self, other):
+        if np.isscalar(other):
+            other = float(other)  # type: ignore[assignment]
+            return Point(other // self.y, other // self.x)
+        y, x = other  # type: ignore[assignment]
+        return Point(float(y) // self.y, float(x) // self.x)
+
     @classmethod
     def origin(cls):
         return cls(0, 0)
@@ -653,7 +666,7 @@ class Point(NamedTuple):
             s = s.strip("()")
             y_str, x_str = s.split(",")
             return cls(float(y_str), float(x_str))
-        elif isinstance(s, tuple) and len(s) == 2 and all(np.isscalar(_) for _ in s):
+        elif isinstance(s, (tuple, list)) and len(s) == 2 and all(np.isscalar(_) for _ in s):
             return cls(float(s[0]), float(s[1]))  # type: ignore[assignment]
         elif isinstance(s, np.ndarray) and s.shape == (2,):
             return cls(float(s[0]), float(s[1]))

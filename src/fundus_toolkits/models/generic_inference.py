@@ -107,7 +107,10 @@ class GenericFundusInference[**P]:
             fundus, infos = self.preprocess_fundus(fundus)
             fundus_mask = self.preprocess_fundus_mask(fundus, fundus_mask, infos)
             tensor = self.__wrapped__(fundus, *args, **kwargs)
-            return self.postprocess_output_map(tensor, infos, fundus_mask)
+            if isinstance(tensor, tuple):
+                return (self.postprocess_output_map(tensor[0], infos, fundus_mask),) + tensor[1:]
+            else:
+                return self.postprocess_output_map(tensor, infos, fundus_mask)
 
     @staticmethod
     def preprocess_fundus(

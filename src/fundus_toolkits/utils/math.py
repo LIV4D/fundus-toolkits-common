@@ -1,7 +1,7 @@
 import numpy as np
 
 
-def ensure_superior_multiple(x, m=32):
+def ensure_superior_multiple(x, m):
     """
     Return the smallest integer greater than or equal to x that is a multiple of m.
     """

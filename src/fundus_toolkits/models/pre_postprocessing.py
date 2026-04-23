@@ -188,6 +188,7 @@ def basic_fundus_pre_postprocessing(
     segmented_structure_name: Optional[str] = None,
     output_channels: bool | Sequence[str] = True,
     rgb_to_bgr: bool = False,
+    pad: int = 0,
     pad_to_multiple: Optional[int] = None,
     auto_resize=True,
     final_activation: Optional[Literal["softmax", "sigmoid"]] = None,  # noqa: F821
@@ -206,6 +207,8 @@ def basic_fundus_pre_postprocessing(
         The name of the model. Only used for warning messages, by default None.
     rgb_to_bgr : bool, optional
         Whether to convert the input image from RGB to BGR, by default False.
+    pad:  Optional[int], optional
+        If provided, pad the input image with this many pixels on each side, by default 0.
     pad_to_multiple : Optional[int], optional
         If provided, pad the input image to be a multiple of this value, by default None.
     auto_resize : bool, optional
@@ -286,8 +289,10 @@ def basic_fundus_pre_postprocessing(
             x = (x - mean) / std
 
         # --- Ensure x shape is a multiple of pad_to_multiple ---
-        if pad_to_multiple is not None:
-            padded_shape = [ensure_superior_multiple(s, pad_to_multiple) for s in x.shape]
+        if pad > 0 or pad_to_multiple is not None:
+            padded_shape = [s + pad for s in x.shape]
+            if pad_to_multiple is not None:
+                padded_shape = [ensure_superior_multiple(s, pad_to_multiple) for s in padded_shape]
             x = crop_pad(x, padded_shape)
 
         return (x,), preprocessing_info

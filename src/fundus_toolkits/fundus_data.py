@@ -1,18 +1,26 @@
 from __future__ import annotations
 
 import typing
-from collections.abc import Sequence
 from copy import copy
 from enum import Enum, IntEnum
 from pathlib import Path
 from types import EllipsisType
-from typing import TYPE_CHECKING, Literal, Optional, Self, Tuple, TypeAlias, TypedDict, overload
+from typing import TYPE_CHECKING, Literal, Optional, Self, Tuple, TypeAlias, TypedDict, overload, Generator
 
 import numpy as np
 import numpy.typing as npt
 
+from .utils.data_io import most_common_image_ext
 from .utils.geometric import Point, Rect
-from .utils.image import crop_pad_center, find_centroid, label_map_to_rgb, read_image, resize, write_image
+from .utils.image import (
+    crop_pad_center,
+    find_centroid,
+    label_map_to_rgb,
+    read_image,
+    resize,
+    write_image,
+    read_image_shape,
+)
 from .utils.safe_import import is_torch_tensor
 
 if TYPE_CHECKING:
@@ -20,7 +28,7 @@ if TYPE_CHECKING:
 
     from .utils.typing import PathLike
 
-    type ImageSource = torch.Tensor | npt.NDArray | PathLike | Sequence[PathLike]
+    type ImageSource = torch.Tensor | npt.NDArray | PathLike  # | Sequence[PathLike]
 
 ABSENT = Point(float("nan"), float("nan"))
 
@@ -118,7 +126,7 @@ class FundusData:
         macula_center=None,
         name: Optional[str] = None,
         check_validity: bool = True,
-        target_shape: Optional[Tuple[int, int]] = None,
+        shape: Optional[Tuple[int, int] | ImageSource] = None,
         reshape_method: ReshapeMethods = ReshapeMethod.RAISE,
         immutable: bool = False,
     ):
@@ -135,10 +143,15 @@ class FundusData:
                 name = Path(macula).stem
         self._name = name
 
-        shape: Optional[Tuple[int, int]] = target_shape
+        if isinstance(shape, (Path, str)):
+            shape = read_image_shape(shape)
+        elif isinstance(shape, np.ndarray) or is_torch_tensor(shape):
+            shape = tuple(shape.shape[-2:])  # type: ignore[assignment]
+        assert shape is None or (isinstance(shape, tuple) and len(shape) == 2), "Shape must be a tuple of (H, W)."
+
         if image is not None:
             if check_validity:
-                image = self.load_fundus_image(image, target_shape, reshape_method=reshape_method)
+                image = self.load_fundus_image(image, shape, reshape_method=reshape_method)
             else:
                 assert isinstance(image, np.ndarray), "The image must be a numpy array."
             self._image = image
@@ -159,6 +172,8 @@ class FundusData:
                 shape = roi_mask.shape[-2:]  # type: ignore[assignment]
         elif self._image is not None:
             self._roi_mask = self.load_fundus_mask(self._image, from_fundus=True)
+        else:
+            self._roi_mask = None
 
         if vessels is not None:
             if check_validity:
@@ -216,6 +231,16 @@ class FundusData:
 
         self._immutable = immutable
 
+    @classmethod
+    def empty_like(cls, data: ImageSource) -> Self:
+        """Convert the given data to a fundus image format (numpy array of shape (3, H, W) and type float32)."""
+        name = ...
+        if isinstance(data, str):
+            name = Path(data).stem
+        elif isinstance(data, Path):
+            name = data.stem
+        return cls(shape=data, name=name)
+
     type Fields = Literal["image", "fundus_mask", "vessels", "av", "od", "macula"]
 
     def update(
@@ -225,11 +250,15 @@ class FundusData:
         vessels: ImageSource | EllipsisType = ...,
         av: ImageSource | EllipsisType = ...,
         od: ImageSource | EllipsisType = ...,
+        od_center: Point | EllipsisType = ...,
+        od_size: Point | EllipsisType = ...,
         macula: ImageSource | EllipsisType = ...,
+        macula_center: Point | EllipsisType = ...,
         name: str | EllipsisType = ...,
         *,
         reshape_method: ReshapeMethods = ReshapeMethod.RAISE,
         crop_pad: Optional[Rect] = None,
+        roi: Optional[Rect] = None,
         inplace: bool = False,
     ) -> Self:
         """Return a copy of this FundusData with updated fields. The fields that are not specified are kept unchanged.
@@ -247,8 +276,14 @@ class FundusData:
             If specified, update the artery/vein segmentation image.
         od : ImageSource | EllipsisType, optional
             If specified, update the optic disc image.
+        od_center : Point | EllipsisType, optional
+            If specified, update the optic disc center.
+        od_size : Point | EllipsisType, optional
+            If specified, update the optic disc size.
         macula : ImageSource | EllipsisType, optional
             If specified, update the macula image.
+        macula_center : Point | EllipsisType, optional
+            If specified, update the macula center.
         name : str | EllipsisType, optional
             If specified, update the name of the FundusData.
         reshape_method : ReshapeMethods, optional
@@ -283,21 +318,38 @@ class FundusData:
             reshape_method: ReshapeMethods
             target_shape: Tuple[int, int]
 
-        shape_opts = ShapeOpts(crop_pad=crop_pad, reshape_method=reshape_method, target_shape=self.shape)
+        shape_opts = ShapeOpts(
+            crop_pad=crop_pad, reshape_method=reshape_method, target_shape=self.shape if roi is None else roi.shape
+        )
+
+        def roi_crop(img):
+            if roi is None:
+                return img
+            return Rect.from_size(img.shape).crop_pad_image(img, dst=roi, dst_shape=self.shape)
 
         if image is not ...:
-            other._image = other.load_fundus_image(image, **shape_opts)
+            other._image = roi_crop(other.load_fundus_image(image, **shape_opts))
         if roi_mask is not ...:
-            other._roi_mask = other.load_fundus_mask(roi_mask, **shape_opts)
+            other._roi_mask = roi_crop(other.load_fundus_mask(roi_mask, **shape_opts))
         if vessels is not ...:
-            other._vessels = other.load_vessels(vessels, **shape_opts)
+            other._vessels = roi_crop(other.load_vessels(vessels, **shape_opts))
         if av is not ...:
-            other._av = other.load_av(av, **shape_opts)
-
+            other._av = roi_crop(other.load_av(av, **shape_opts))
         if od is not ...:
-            other._od, other._od_center, other._od_size = other.load_od_macula(od, **shape_opts, fit_ellipse=True)
+            seg_map, center, other._od_size = other.load_od_macula(od, **shape_opts, fit_ellipse=True)
+            other._od = roi_crop(seg_map)
+            other._od_center = center if roi is None else center + roi.top_left
         if macula is not ...:
-            other._macula, other._macula_center = other.load_od_macula(macula, **shape_opts)
+            seg_map, center = other.load_od_macula(macula, **shape_opts)
+            other._macula = roi_crop(seg_map)
+            other._macula_center = center if roi is None else center + roi.top_left
+
+        if od_center is not ...:
+            other._od_center = Point.parse(od_center)
+        if od_size is not ...:
+            other._od_size = Point.parse(od_size)
+        if macula_center is not ...:
+            other._macula_center = Point.parse(macula_center)
         if name is not ...:
             other._name = name
         return other
@@ -347,6 +399,59 @@ class FundusData:
             mutable = not self._immutable
         other._set_immutable_flag(not mutable)
         return other
+
+    @classmethod
+    def from_folders(
+        cls,
+        image: PathLike | Ellipsis = ...,
+        roi_mask: PathLike | Ellipsis = ...,
+        vessels: PathLike | Ellipsis = ...,
+        av: PathLike | Ellipsis = ...,
+        od: PathLike | Ellipsis = ...,
+        macula: PathLike | Ellipsis = ...,
+    ) -> Generator[Self]:
+        """Load fundus data from folders containing the different modalities. Each folder must contain files with the same name.
+
+        Parameters
+        ----------
+        image : PathLike | Ellipsis, optional
+            Folder containing the fundus images.
+
+        roi_mask : PathLike | Ellipsis, optional
+            Folder containing the fundus masks.
+
+        vessels : PathLike | Ellipsis, optional
+            Folder containing the vessels segmentations.
+
+        av : PathLike | Ellipsis, optional
+            Folder containing the artery/vein segmentations.
+
+        od : PathLike | Ellipsis, optional
+            Folder containing the optic disc segmentations.
+
+        macula : PathLike | Ellipsis, optional
+            Folder containing the macula segmentations.
+
+        Yields
+        ------
+        Iterator[Self]
+            An iterator over the loaded FundusData instances.
+        """
+
+        def list_files(folder: PathLike) -> dict[str, Path]:
+            return {Path(p).stem: p for p in Path(folder).glob(f"*{most_common_image_ext(folder)}")}
+
+        paths = {
+            modality: list_files(folder)
+            for modality, folder in dict(
+                image=image, roi_mask=roi_mask, vessels=vessels, av=av, od=od, macula=macula
+            ).items()
+            if folder is not ...
+        }
+
+        common_names = set.intersection(*(set(p.keys()) for p in paths.values()))
+        for name in common_names:
+            yield cls(**{modality: paths[modality][name] for modality in paths.keys()} | {"name": name})
 
     def remove_od_from_vessels(self):
         updated_data = {}
@@ -1026,6 +1131,10 @@ class FundusData:
         return self._macula
 
     @property
+    def has_macula_center(self) -> bool:
+        return self._macula_center is not None
+
+    @property
     def macula_center(self) -> Optional[Point]:
         """The center of the macula or None if the macula is not visible in this fundus.
 
@@ -1252,6 +1361,78 @@ class FundusData:
             other._macula = resize(self._macula, shape, interpolation=True)
         return other
 
+    def crop(self, rect: Rect) -> Self:
+        """Crop the fundus image and the vessels segmentation to a given rectangle.
+
+        Parameters
+        ----------
+        rect : Rect
+            The rectangle to which to crop the image.
+
+        Returns
+        -------
+            FundusData
+                The cropped fundus image and vessels segmentation.
+        """
+        src, dst = rect.crop_pad_slices(src_shape=self.shape)
+
+        def crop_center(array: npt.NDArray) -> npt.NDArray:
+            result = np.zeros(dtype=array.dtype, shape=array.shape[:-2] + rect.shape)
+            result[..., *dst] = array[..., *src]
+            return result
+
+        updated_data = {}
+        if self._image is not None:
+            updated_data["image"] = crop_center(self._image)
+        if self._roi_mask is not None:
+            updated_data["roi_mask"] = crop_center(self._roi_mask)
+        if self._vessels is not None:
+            updated_data["vessels"] = crop_center(self._vessels)
+        if self._av is not None:
+            updated_data["av"] = crop_center(self._av)
+        if self._od is not None:
+            updated_data["od"] = crop_center(self._od)
+        if self._macula is not None:
+            updated_data["macula"] = crop_center(self._macula)
+        return self.__class__(**updated_data, name=self._name, immutable=self._immutable)
+
+    def uncrop(self, roi: Rect, dst_shape: tuple[int, int]) -> Self:
+        """Uncrop the fundus image and the vessels segmentation from a given rectangle to a given shape.
+
+        Parameters
+        ----------
+        roi : Rect
+            The rectangle from which to uncrop the image.
+        dst_shape : tuple[int, int]
+            The shape to which to uncrop the image.
+
+        Returns
+        -------
+            FundusData
+                The uncropped fundus image and vessels segmentation.
+        """
+        src, dst = roi.crop_pad_slices(dst_shape=dst_shape)
+
+        def uncrop_center(array: npt.NDArray) -> npt.NDArray:
+            result = np.zeros(dtype=array.dtype, shape=array.shape[:-2] + dst_shape)
+            result[..., *src] = array[..., *dst]
+            return result
+
+        updated_data = {}
+        if self._image is not None:
+            updated_data["image"] = uncrop_center(self._image)
+        if self._roi_mask is not None:
+            updated_data["roi_mask"] = uncrop_center(self._roi_mask)
+        if self._vessels is not None:
+            updated_data["vessels"] = uncrop_center(self._vessels)
+        if self._av is not None:
+            updated_data["av"] = uncrop_center(self._av)
+        if self._od is not None:
+            updated_data["od"] = uncrop_center(self._od)
+        if self._macula is not None:
+            updated_data["macula"] = uncrop_center(self._macula)
+        return self.__class__(**updated_data, name=self._name, immutable=self._immutable)
+
     @overload
     def crop_to_roi(self, *, pad: float = 0.01, ensure_square=True, return_roi: Literal[False] = False) -> Self: ...
     @overload
@@ -1283,25 +1464,6 @@ class FundusData:
         if ensure_square:
             side = max(r.h, r.w)
             r = r.from_center(r.center, (side, side))
-        src, dst = r.crop_pad_slices(src_shape=self.shape)
 
-        def crop_pad_center(array: npt.NDArray) -> npt.NDArray:
-            result = np.zeros(dtype=array.dtype, shape=array.shape[:-2] + r.shape)
-            result[..., *dst] = array[..., *src]
-            return result
-
-        updated_data = {}
-        if self._image is not None:
-            updated_data["image"] = crop_pad_center(self._image)
-        if self._roi_mask is not None:
-            updated_data["roi_mask"] = crop_pad_center(self._roi_mask)
-        if self._vessels is not None:
-            updated_data["vessels"] = crop_pad_center(self._vessels)
-        if self._av is not None:
-            updated_data["av"] = crop_pad_center(self._av)
-        if self._od is not None:
-            updated_data["od"] = crop_pad_center(self._od)
-        if self._macula is not None:
-            updated_data["macula"] = crop_pad_center(self._macula)
-        fundus = type(self)(**updated_data, name=self._name, immutable=self._immutable)
+        fundus = self.crop(r)
         return (fundus, r) if return_roi else fundus
