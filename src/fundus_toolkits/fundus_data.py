@@ -552,6 +552,7 @@ class FundusData:
         target_shape: Optional[Tuple[int, int]] = None,
         reshape_method: ReshapeMethods = ReshapeMethod.RAISE,
         crop_pad: Optional[Rect] = None,
+        name: Optional[str] = None,
     ) -> npt.NDArray[np.bool_]:
         """Load a fundus mask from various sources.
 
@@ -578,7 +579,7 @@ class FundusData:
             from .utils.fundus import fundus_ROI
 
             fundus = cls.load_fundus_image(fundus_mask, target_shape, reshape_method=reshape_method, crop_pad=crop_pad)
-            fundus_mask_ = fundus_ROI(fundus)  # Compute the fundus mask from the fundus image
+            fundus_mask_ = fundus_ROI(fundus, check=True if name is None else name)  # Compute the fundus mask
         else:
             # --- Load the image ---
             if isinstance(fundus_mask, (str, Path)):
@@ -667,7 +668,7 @@ class FundusData:
             vessels_ = vessels_ > 127 if vessels_.dtype == np.uint8 else vessels_ > 0.5
 
         # -- Resize the image ---
-        if target_shape is not None and target_shape != vessels_.shape[-2]:
+        if target_shape is not None and target_shape != vessels_.shape[-2:]:
             match ReshapeMethod.parse(reshape_method):
                 case ReshapeMethod.RESIZE:
                     vessels_ = resize(vessels_, target_shape, interpolation=True)
@@ -1019,7 +1020,7 @@ class FundusData:
                 raise AttributeError("The optic disc segmentation was not provided.")
             else:
                 _, self._od_center, self._od_size = self.load_od_macula(self._od, self.shape, fit_ellipse=True)
-        return None if self._od_center is ABSENT else self._od_center
+        return None if self._od_center.is_nan() else self._od_center
 
     def od_region(
         self,
@@ -1148,16 +1149,16 @@ class FundusData:
                 raise AttributeError("The macula segmentation was not provided.")
             else:
                 _, self._macula_center = self.load_od_macula(self._macula, self.shape)
-        return None if self._macula_center is ABSENT else self._macula_center
+        return None if self._macula_center.is_nan() else self._macula_center
 
-    def infered_macula_center(self) -> Optional[Point]:
-        """The center of the macula or the center of the fundus if the macula is not visible."""
-        if self._macula_center is not None:
-            return None if self._macula_center is ABSENT else self._macula_center
+    def inferred_macula_center(self) -> Optional[Point]:
+        """The center of the macula or the center of the fundus if the optic disc is not visible."""
+        if self._macula_center is not None and not self._macula_center.is_nan():
+            return self._macula_center
         if self._od_center is None:
             return None
 
-        half_weight = self._shape[1] * 0.4  # Assume 45° fundus image
+        half_weight = self.shape[1] * 0.5  # Assume 45° fundus image
         if self._od_center[1] > half_weight:
             half_weight = -half_weight
         return Point(self._od_center.y, x=self._od_center.x + half_weight)

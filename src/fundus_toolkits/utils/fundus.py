@@ -13,11 +13,12 @@ if TYPE_CHECKING:
 def fundus_ROI(
     fundus: np.ndarray,
     blur_radius=5,
-    red_threshold: int = 30,
+    red_threshold: int = 20,
     morphological_clean=False,
     smoothing_radius=0,
     final_erosion=5,
-    check=True,
+    convex_hull=True,
+    check: bool | str = True,
 ) -> npt.NDArray[np.bool_]:
     """Compute the region of interest (ROI) of a fundus image by thresholding its red channel.
 
@@ -106,10 +107,16 @@ def fundus_ROI(
     # Convert to boolean mask
     mask = mask > 125
 
+    if convex_hull:
+        from skimage.morphology import convex_hull_image
+
+        mask = convex_hull_image(mask)
+
     if check:
         if mask.sum() < min(mask.shape) ** 2 * 0.6:
+            check = "." if check is True else f" ({check})."
             warnings.warn(
-                "The computed ROI mask is smaller than 60% of the image size and might be invalid.",
+                "The computed ROI mask is smaller than 60% of the image size and might be invalid" + check,
                 RuntimeWarning,
                 stacklevel=2,
             )

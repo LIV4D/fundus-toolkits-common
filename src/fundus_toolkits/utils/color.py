@@ -72,3 +72,47 @@ def color_jitter(
 
         jittered_color = Color("hsv", (h_new, s_new, v_new)).convert("srgb")
         yield np.array([(c * 255) for c in jittered_color.coords()], dtype=np.uint8)
+
+
+def darken_hex(color: str, amount: float) -> str:
+    """Darken a hex color by a given amount.
+
+    Parameters
+    ----------
+    color : str
+        The input color as a hex string (e.g., "#RRGGBB").
+    amount : float
+        The amount to darken the color, in the range [0, 1].
+
+    Returns
+    -------
+    str
+        The darkened color as a hex string.
+    """
+    from coloraide import Color
+
+    c = Color(color).convert("lab")
+    c[0] = max(0, c[0] * (1 - amount))  # Darken by reducing the lightness
+    return c.convert("srgb").to_string(hex=True)
+
+
+def lighten_hex(color: str, amount: float) -> str:
+    """Darken a hex color by a given amount.
+
+    Parameters
+    ----------
+    color : str
+        The input color as a hex string (e.g., "#RRGGBB").
+    amount : float
+        The amount to darken the color, in the range [0, 1].
+
+    Returns
+    -------
+    str
+        The darkened color as a hex string.
+    """
+    from coloraide import Color
+
+    c = Color(color).convert("lab")
+    c[0] = min(100, c[0] * (1 + amount))  # Lighten by increasing the lightness
+    return c.convert("srgb").to_string(hex=True)
