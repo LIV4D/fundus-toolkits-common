@@ -17,7 +17,7 @@ def fundus_ROI(
     morphological_clean=False,
     smoothing_radius=0,
     final_erosion=5,
-    convex_hull=True,
+    convex_hull=False,
     check: bool | str = True,
 ) -> npt.NDArray[np.bool_]:
     """Compute the region of interest (ROI) of a fundus image by thresholding its red channel.

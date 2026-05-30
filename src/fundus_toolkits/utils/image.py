@@ -691,6 +691,11 @@ def find_centroid(
     largest_cc = np.argmax(stats[1:, cv2.CC_STAT_AREA]) + 1 if stats.shape[0] > 2 else 1
     if not fit_ellipse:
         return labels == largest_cc, Point(*centroids[1][::-1])
-    contours, _ = cv2.findContours((labels == largest_cc).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    ellipse = cv2.fitEllipse(contours[0])
+    try:
+        contours, _ = cv2.findContours(
+            (labels == largest_cc).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        ellipse = cv2.fitEllipse(contours[0])
+    except Exception:
+        return labels == largest_cc, Point(*centroids[1][::-1]), ABSENT
     return labels == largest_cc, Point(*ellipse[0][::-1]), Point(*ellipse[1][::-1])

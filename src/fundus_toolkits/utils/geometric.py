@@ -191,7 +191,7 @@ class Rect(NamedTuple):
         return isinstance(rect, tuple) and (rect.w == 0 or rect.h == 0)
 
     @overload
-    def crop_pad_slices(
+    def crop_pad_slices_legacy(
         src,
         dst: Optional[Rect | tuple[int, int]] = None,
         *,
@@ -200,7 +200,7 @@ class Rect(NamedTuple):
         dst_shape: Optional[tuple[int, int]] = None,
     ) -> tuple[tuple[slice, slice], tuple[slice, slice]]: ...
     @overload
-    def crop_pad_slices(
+    def crop_pad_slices_legacy(
         src,
         dst: Optional[Rect | tuple[int, int]] = None,
         *,
@@ -208,7 +208,7 @@ class Rect(NamedTuple):
         src_shape: Optional[tuple[int, int]] = None,
         dst_shape: Optional[tuple[int, int]] = None,
     ) -> tuple[tuple[EllipsisType, slice, slice], tuple[EllipsisType, slice, slice]]: ...
-    def crop_pad_slices(
+    def crop_pad_slices_legacy(
         src,
         dst: Optional[Rect | tuple[int, int]] = None,
         *,
@@ -258,7 +258,7 @@ class Rect(NamedTuple):
             dst = Rect(h, w, src_dy, src_dx)
         else:
             dst = Rect.from_tuple(dst)
-            assert dst.size == src.size, "Source and destination rectangles must have the same size"
+            # assert dst.size == src.size, "Source and destination rectangles must have the same size"
 
             dy, dx = max(-dst.top_left.y, src_dy), max(-dst.top_left.x, src_dx)
 
@@ -280,23 +280,19 @@ class Rect(NamedTuple):
     def crop_pad_image[T: np.generic](
         self,
         image: npt.NDArray[T],
-        dst: Optional[Rect | tuple[int, int]] = None,
-        dst_shape: Optional[tuple[int, int]] = None,
+        origin: Optional[Point | tuple[int, int]] = None,
         *,
         channel_last: bool = False,
     ) -> npt.NDArray[T]:
-        """Crop/pad an image to fit into the destination rectangle.
+        """Crop/pad an image accordingly to this rectangle.
 
         Parameters
         ----------
         image : npt.NDArray[T]
             The image to crop/pad with shape [..., height, width].
 
-        dst : Rect | tuple[int, int] | None
-            The destination rectangle or shape (height, width). If None, use the shape of this rectangle.
-
-        dst_shape : tuple[int, int], optional
-            The shape of the destination image. If provided, the destination rectangle will be clipped to this shape.
+        origin : Point | None
+            The origin of the coordinates system in the image. If None, assume that the origin is at (0, 0).
 
         channel_last : bool, optional
             If True, the input image should have shape [height, width, C] and the output image will have shape [height, width, C].
@@ -313,19 +309,13 @@ class Rect(NamedTuple):
         """
         if channel_last and image.ndim == 3:
             image = image.transpose(2, 0, 1)
-        src_slice, dst_slice = self.crop_pad_slices(
-            dst, src_shape=image.shape[-2:], dst_shape=dst_shape, prefix_ellipsis=True
-        )
 
-        if dst_shape is None:
-            if dst is None:
-                dst_shape = self.shape
-            else:
-                if not isinstance(dst, Rect):
-                    dst = Rect.from_tuple(dst)
-                dst_shape = dst.shape
+        src_domain = Rect.from_size(image.shape[-2:])
+        if origin is not None:
+            src_domain -= Point.parse(origin)
+        src_slice, dst_slice = crop_pad_slices(src_domain, self, prefix_ellipsis=True)
 
-        dst_image = np.zeros(image.shape[:-2] + dst_shape, dtype=image.dtype)
+        dst_image = np.zeros(image.shape[:-2] + self.shape, dtype=image.dtype)
         dst_image[dst_slice] = image[src_slice]
         if channel_last and dst_image.ndim == 3:
             dst_image = dst_image.transpose(1, 2, 0)
@@ -569,6 +559,67 @@ class Rect(NamedTuple):
         """
         r = sum(((r,) if isinstance(r, Rect) else tuple(r) for r in rects), ())
         return reduce(lambda a, b: a & b, r)  # type: ignore
+
+
+@overload
+def crop_pad_slices(
+    dst: Rect | Point | tuple[int, int] | tuple[int, int, int, int],
+    src: Rect | Point | tuple[int, int] | tuple[int, int, int, int],
+    *,
+    prefix_ellipsis: Literal[False] = False,
+) -> tuple[tuple[slice, slice], tuple[slice, slice]]: ...
+@overload
+def crop_pad_slices(
+    dst: Rect | Point | tuple[int, int] | tuple[int, int, int, int],
+    src: Rect | Point | tuple[int, int] | tuple[int, int, int, int],
+    *,
+    prefix_ellipsis: Literal[False] = False,
+) -> tuple[tuple[EllipsisType, slice, slice], tuple[EllipsisType, slice, slice]]: ...
+def crop_pad_slices(
+    src: Rect | Point | tuple[int, int] | tuple[int, int, int, int],
+    dst: Rect | Point | tuple[int, int] | tuple[int, int, int, int],
+    *,
+    prefix_ellipsis: bool = False,
+) -> (
+    tuple[tuple[slice, slice], tuple[slice, slice]]
+    | tuple[tuple[EllipsisType, slice, slice], tuple[EllipsisType, slice, slice]]
+):
+    """Provide slices to crop/pad 2d matrix from the src domain to the dst domain.
+
+    Parameters
+    ----------
+    src: Rect | Point | tuple[int, int] | tuple[int, int, int, int]
+        The source domain as a rectangle or a shape. If only a shape is provided the origin of the source domain is assumed to be at (0, 0).
+
+    dst: Rect | Point | tuple[int, int] | tuple[int, int, int, int]
+        The destination domain as a rectangle or a shape. If only a shape is provided the origin of the destination domain is assumed to be at (0, 0).
+
+    prefix_ellipsis: bool, optional
+        If True, add an ellipsis at the beginning of the slices to support images with more than 2 dimensions.
+
+
+    Returns
+    -------
+        A tuple of 2 tuples of slices, the first tuple is the slices to crop from the source domain, and the second tuple is the slices to pad into the destination domain.
+        The slices are in the format (slice_y, slice_x) and can be used to index into a numpy array.
+
+    Raises
+    ------
+    TypeError
+        If the input is not a Rect or a tuple of 2 integers.
+    """
+    src_rect = Rect.from_tuple(src)
+    dst_rect = Rect.from_tuple(dst)
+
+    inter = src_rect & dst_rect
+    if inter.is_empty():
+        slices = (slice(0, 0), slice(0, 0)), (slice(0, 0), slice(0, 0))
+    else:
+        src_slice = (inter - src_rect.top_left).slice()
+        dst_slice = (inter - dst_rect.top_left).slice()
+        slices = src_slice, dst_slice
+
+    return ((..., slices[0][0], slices[0][1]), (..., slices[1][0], slices[1][1])) if prefix_ellipsis else slices
 
 
 class Point(NamedTuple):

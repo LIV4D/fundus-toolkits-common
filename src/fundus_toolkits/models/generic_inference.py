@@ -43,7 +43,9 @@ class GenericFundusInference[**P]:
     """Use a model to segment a fundus image or a batch of fundus images."""
 
     def __init__(
-        self, infer_func: FundusInferenceInternalFunc[P], fundus_data_field: FundusData.Fields | FundusDataFieldUpdater
+        self,
+        infer_func: FundusInferenceInternalFunc[P],
+        fundus_data_field: FundusData.Fields | FundusDataFieldUpdater | None = None,
     ) -> None:
         self.__wrapped__ = infer_func
         self._fundus_data_field = fundus_data_field
@@ -287,7 +289,7 @@ class GenericFundusInference[**P]:
                     assert isinstance(fundus_data, FundusData), "Mismatch between input and output."
                     if callable(self._fundus_data_field):
                         self._fundus_data_field(fundus_data, map_np)  # type: ignore[arg-type]
-                    else:
+                    elif self._fundus_data_field is not None:
                         fundus_data.update(**{self._fundus_data_field: map_np}, inplace=True)  # type: ignore[arg-type]
                 else:
                     assert is_fundus_data_sequence(fundus_data) and len(fundus_data) == map_np.shape[0], (
@@ -296,7 +298,7 @@ class GenericFundusInference[**P]:
                     for f, m in zip(fundus_data, map_np, strict=True):
                         if callable(self._fundus_data_field):
                             self._fundus_data_field(f, m)  # type: ignore[arg-type]
-                        else:
+                        elif self._fundus_data_field is not None:
                             f.update(**{self._fundus_data_field: m}, inplace=True)  # type: ignore[arg-type]
 
             return map_np
@@ -309,7 +311,7 @@ class GenericFundusInference[**P]:
 
 
 def fundus_inference[**P](
-    fundus_data_field: FundusData.Fields | FundusDataFieldUpdater,
+    fundus_data_field: FundusData.Fields | FundusDataFieldUpdater | None = None,
 ) -> Callable[[FundusInferenceInternalFunc[P]], FundusInferenceFunc[P]]:
     def decorator(infer_func: FundusInferenceInternalFunc[P]) -> FundusInferenceFunc[P]:
         return GenericFundusInference(infer_func, fundus_data_field)

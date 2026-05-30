@@ -971,6 +971,28 @@ class FundusData:
         return av * self.vessels if self._vessels is not None else av
 
     @property
+    def artery_map(self) -> npt.NDArray[np.bool_]:
+        """The binary segmentation of the arteries.
+
+        Raises
+        ------
+        AttributeError
+            If the arteries and veins segmentation was not provided.
+        """
+        return np.isin(self.av, (AVLabel.ART, AVLabel.BOTH))
+
+    @property
+    def vein_map(self) -> npt.NDArray[np.bool_]:
+        """The binary segmentation of the veins.
+
+        Raises
+        ------
+        AttributeError
+            If the arteries and veins segmentation was not provided.
+        """
+        return np.isin(self.av, (AVLabel.VEI, AVLabel.BOTH))
+
+    @property
     def av_not_masked(self) -> npt.NDArray[np.uint8]:
         """The arteries and veins labels of the vessels segmentation. The labels are defined in the `AVLabel` enum.
 
@@ -1024,38 +1046,47 @@ class FundusData:
 
     def od_region(
         self,
-        min_radius: float = 0,
-        max_radius: Optional[float] = None,
-        apply_mask: Optional[bool] = None,
+        outer_radius: Optional[float] = None,
+        inner_radius: Optional[float] = None,
+        *,
+        multiply_by_od_diameter: bool = True,
+        offset_by_od_radius: bool = True,
+        mask_roi: Optional[bool] = None,
         exclude_od: bool = True,
     ) -> npt.NDArray[np.bool_]:
         """Generate the mask of a region between an inner circle and an outer circle centered on the optic disc.
 
         Parameters
         ----------
-        min_radius : float, optional
-            Radius of the inner circle of the region. `min_radius` is multiplied by the optic disc diameter.
+        outer_radius : Optional[float], optional
+            Radius of the outer circle of the region.
 
-        max_radius : Optional[float], optional
-            Radius of the outer circle of the region. `max_radius` is multiplied by the optic disc diameter.
+        inner_radius : float, optional
+            Radius of the inner circle of the region­.
 
-        apply_mask : bool, optional
-            If true, the fundus_mask is
+        multiply_by_od_diameter : bool, optional
+            If true (by default), the radius of the inner and outer circle are multiplied by the optic disc radius.
 
+        offset_by_od_radius : bool, optional
+            If true (by default), the radius of the inner and outer circle are offset by the optic disc radius, effectively removing the optic disc from the region if `inner_radius` is 0.
+
+        mask_roi : bool, optional
+            If true, the returned region is masked by the fundus ROI mask.
+            By default, true if the fundus ROI mask is available, false otherwise.
+
+        exclude_od : bool, optional
+            If true (by default), the optic disc is excluded from the region, even if `inner_radius` is inside the optic disc.
 
         Returns
         -------
         npt.NDArray[bool]
-            _description_
+            A binary mask of the same shape as the fundus image, where True values correspond to pixels in the defined region.
         """
-        if apply_mask is None:
-            apply_mask = self.has_roi_mask
-        mask = np.ones(self.shape, bool) if not apply_mask else self.roi_mask
-        if exclude_od:
+        if mask_roi is None:
+            mask_roi = self.has_roi_mask
+        mask = np.ones(self.shape, bool) if not mask_roi else self.roi_mask
+        if offset_by_od_radius:
             mask &= ~self.od
-
-        if min_radius == 0 and max_radius is None:
-            return mask
 
         od = self.od_center
         od_diameter = self.od_diameter
@@ -1067,14 +1098,18 @@ class FundusData:
         dist_map = np.linalg.norm(np.stack(np.mgrid[-y0 : H - y0, -x0 : W - x0], axis=0), axis=0)  # type: ignore
 
         def scale_radius(radius: float) -> float:
-            if exclude_od:
-                radius += 0.5
-            return radius * od_diameter
+            if multiply_by_od_diameter:
+                if offset_by_od_radius:
+                    radius += 0.5
+                radius *= self.od_diameter / 2
+            elif offset_by_od_radius:
+                radius += self.od_diameter / 2
+            return radius
 
-        if min_radius > (-0.5 if exclude_od else 0):
-            mask &= dist_map >= scale_radius(min_radius)
-        if max_radius is not None:
-            mask &= dist_map <= scale_radius(max_radius)
+        if inner_radius is not None and (inner_radius := scale_radius(inner_radius)) > 0:
+            mask &= dist_map >= inner_radius
+        if outer_radius is not None:
+            mask &= dist_map <= scale_radius(outer_radius)
         return mask
 
     @property
@@ -1308,6 +1343,8 @@ class FundusData:
             other._roi_mask = rotate(self._roi_mask, angle)
         if self._vessels is not None:
             other._vessels = rotate(self._vessels, angle)
+        if self._av is not None:
+            other._av = rotate(self._av, angle)
         if self._od is not None:
             other._od = rotate(self._od, angle)
         if self._macula is not None:
@@ -1341,6 +1378,8 @@ class FundusData:
         else:
             raise
 
+        r = Point(shape[0] / self.shape[0], shape[1] / self.shape[1])
+
         other = copy(self)
         other._shape = shape
         if self._image is not None:
@@ -1358,6 +1397,12 @@ class FundusData:
 
         if self._od is not None:
             other._od = resize(self._od, shape, interpolation=True)
+        if self._od_center is not None:
+            other._od_center = other._od_center * r
+        if self._od_size is not None and self._od_size is not ABSENT:
+            other._od_size = other._od_size * r
+        if self._macula_center is not None:
+            other._macula_center = other._macula_center * r
         if self._macula is not None:
             other._macula = resize(self._macula, shape, interpolation=True)
         return other
