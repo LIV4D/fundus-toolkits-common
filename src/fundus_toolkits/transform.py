@@ -8,11 +8,10 @@ from typing import Literal, Mapping, Optional, Self, Type, overload
 
 import numpy as np
 import numpy.typing as npt
-import torch
-from scipy.optimize import least_squares as scipy_least_squares
 
-from fundus_toolkits.utils.geometric import Point, Rect
-from fundus_vessels_toolkit.utils.typing import (
+from .utils.geometric import Point, Rect
+from .utils.safe_import import import_cv2
+from .utils.typing import (
     Bool2DArray,
     Float1DArray,
     Float2DArray,
@@ -27,8 +26,6 @@ from fundus_vessels_toolkit.utils.typing import (
     as_float_pair,
     as_float_pairs,
 )
-
-from .utils.safe_import import import_cv2
 
 
 def _np_short_str(arr: npt.NDArray[np.floating]) -> str:
@@ -188,6 +185,14 @@ class Transform(abc.ABC):
         """
         return False
 
+    @property
+    def is_yx_independent(self) -> bool:
+        """
+        Whether this projection model is independent on the y coordinate for the x coordinate and independent on the x coordinate for the y coordinate.
+        (I.e. it can be decomposed into two 1D projections).
+        """  # noqa: E501
+        return False
+
     def __call__(self, src: FloatPairArrayLike) -> FloatPairArray:
         return self.transform(src)
 
@@ -298,7 +303,7 @@ class Transform(abc.ABC):
         src, dst = as_float_pairs(src), as_float_pairs(dst)
         return np.sum((dst - self.transform(src)) ** 2, axis=1)
 
-    def warp[DTYPE: np.uint8 | np.float32](
+    def warp[DTYPE: np.uint8 | np.float32 | np.bool_](
         self,
         src_img: npt.NDArray[DTYPE],
         src_top_left: Point | tuple[int, int] = (0, 0),
@@ -329,20 +334,27 @@ class Transform(abc.ABC):
         warped_domain : Rect
             The domain of the warped image.
         """  # noqa: E501
+        src_origin = -Point.parse(src_top_left)
+        warped_domain, src_region, src_region_domain = self.select_warped_region(src_img, src_origin, warped_domain)
+        is_bool = src_region.dtype == bool
+        if is_bool:
+            src_region = (src_region * np.uint8(255)).astype(np.uint8)
+        dst_map, warped_domain = self._warp(src_region, src_region_domain, warped_domain)  # type: ignore
+        if is_bool:
+            dst_map = dst_map > 125
+        return dst_map, warped_domain  # type: ignore
+
+    def _warp[DTYPE: np.uint8 | np.float32](
+        self, src_img: npt.NDArray[DTYPE], src_domain: Rect, dst_domain: Rect
+    ) -> tuple[npt.NDArray[DTYPE], Rect]:
         cv2 = import_cv2()
 
-        warped_domain, src_region, src_region_domain = self.select_warped_region(src_img, src_top_left, warped_domain)
-        yy, xx = np.mgrid[warped_domain.slice()]
-        dst_yx = as_float_pairs(np.column_stack((yy.ravel(), xx.ravel())))
-        src_yx = self.transform_inverse(dst_yx) - src_region_domain.top_left.numpy()
-        src_yx = src_yx.reshape(warped_domain.shape + (2,)).astype(np.float32)[..., ::-1]
-
-        dst_map = cv2.remap(src_region, src_yx, None, cv2.INTER_LINEAR)  # type: ignore
-        return dst_map, warped_domain
+        src_remap = self.transform_inverse(dst_domain.grid_indices().astype(np.float32)) - src_domain.top_left.numpy()
+        return cv2.remap(src_img, src_remap[..., ::-1], None, cv2.INTER_LINEAR), dst_domain  # type: ignore
 
     def warped_domain(
         self,
-        src_img: npt.NDArray,
+        src_img_shape: Point | tuple[int, int],
         src_top_left: Point | tuple[int, int] = (0, 0),
         warped_domain: Rect | Literal["full", "same"] = "full",
     ) -> Rect:
@@ -351,8 +363,8 @@ class Transform(abc.ABC):
 
         Parameters
         ----------
-        src_img : npt.NDArray
-            The source image to warp. Only the shape of the image is used.
+        src_img_shape : Point | tuple[int, int]
+            The shape of the source image to warp. The ``src_domain`` is defined as a Rect with the top-left corner defined by ``src_top_left`` and the size of the source image.
 
         src_top_left : Point | tuple[int, int]
             The top-left corner of the source image domain. The ``src_domain`` is defined as a Rect with this top-left corner and the size of the source image.
@@ -368,7 +380,7 @@ class Transform(abc.ABC):
         warped_domain : Rect
             The domain of the warped image.
         """  # noqa: E501
-        src_domain = Rect.from_size((src_img.shape[0], src_img.shape[1])).translate(*src_top_left)
+        src_domain = Rect.from_size((src_img_shape[0], src_img_shape[1])).translate(*src_top_left)
         if warped_domain == "full":
             warped_domain = self.transform_domain(src_domain)
         elif warped_domain == "same":
@@ -541,6 +553,10 @@ class TransformComposition(Transform):
     def is_inverse_exact(self) -> bool:
         return all(T.is_inverse_exact for T in self.Ts)
 
+    @property
+    def is_yx_independent(self) -> bool:
+        return all(T.is_yx_independent for T in self.Ts)
+
     def invert(self) -> Self:
         return type(self)(*(T.invert() for T in reversed(self.Ts)))
 
@@ -582,6 +598,10 @@ class InverseTransform(Transform):
     def is_inverse_exact(self) -> bool:
         return self.T.is_exact
 
+    @property
+    def is_yx_independent(self) -> bool:
+        return self.T.is_yx_independent
+
     def transform(self, src: FloatPairArrayLike) -> FloatPairArray:
         return self.T.transform_inverse(src)
 
@@ -602,6 +622,18 @@ class IdentityTransform(Transform):
     def is_identity(self) -> bool:
         return True
 
+    @property
+    def is_exact(self) -> bool:
+        return True
+
+    @property
+    def is_inverse_exact(self) -> bool:
+        return True
+
+    @property
+    def is_yx_independent(self) -> bool:
+        return True
+
     def invert(self) -> Self:
         return self
 
@@ -619,15 +651,11 @@ class IdentityTransform(Transform):
     def transform_inverse(self, dst: FloatPairArrayLike) -> FloatPairArray:
         return as_float_pairs(dst)
 
-    def warp(
-        self,
-        src_img: npt.NDArray[np.uint8 | np.float32],
-        src_origin: Point | tuple[int, int] = (0, 0),
-        warped_domain: Rect | Literal["full", "same"] = "full",
-    ) -> tuple[npt.NDArray[np.uint8 | np.float32], Rect]:
-        warped_domain, src_region, src_region_domain = self.select_warped_region(src_img, src_origin, warped_domain)
-        dst_img = warped_domain.crop_pad_image(src_region, origin=-src_region_domain.top_left, channel_last=True)
-        return dst_img, warped_domain
+    def _warp[DTYPE: np.uint8 | np.float32](
+        self, src_img: npt.NDArray[DTYPE], src_domain: Rect, dst_domain: Rect
+    ) -> tuple[npt.NDArray[DTYPE], Rect]:
+        dst_img = dst_domain.crop_pad_image(src_img, origin=-src_domain.top_left, channel_last=True)
+        return dst_img, dst_domain
 
 
 class AffineTransform(Transform):
@@ -718,6 +746,10 @@ class AffineTransform(Transform):
     def is_identity(self) -> bool:
         return bool(np.allclose(self.H, np.eye(2)) and np.allclose(self.t, 0))
 
+    @property
+    def is_yx_independent(self) -> bool:
+        return bool(np.allclose(self.H[[0, 1], [1, 0]], [0, 0]))
+
     def invert(self) -> AffineTransform:
         """
         Invert the affine transformation.
@@ -748,18 +780,14 @@ class AffineTransform(Transform):
     def M(self):
         return np.concatenate((self.H, self.t[:, None]), axis=1)
 
-    def warp[DTYPE: np.uint8 | np.float32](
-        self,
-        src_img: npt.NDArray[DTYPE],
-        src_origin: Point | tuple[int, int] = (0, 0),
-        warped_domain: Rect | Literal["full", "same"] = "full",
+    def _warp[DTYPE: np.uint8 | np.float32](
+        self, src_img: npt.NDArray[DTYPE], src_domain: Rect, dst_domain: Rect
     ) -> tuple[npt.NDArray[DTYPE], Rect]:
         cv2 = import_cv2()
 
-        warped_domain, src_region, src_region_domain = self.select_warped_region(src_img, src_origin, warped_domain)
-        T = Translation(-warped_domain.top_left) @ self @ Translation(src_region_domain.top_left)
+        T = Translation(-dst_domain.top_left) @ self @ Translation(src_domain.top_left)
         M_xy = T.M[[1, 0]][:, [1, 0, 2]]  # OpenCV uses (x, y) coordinates while we use (y, x) coordinates
-        return cv2.warpAffine(src_region, M_xy, warped_domain.size.xy, flags=cv2.INTER_LINEAR), warped_domain  # type: ignore
+        return cv2.warpAffine(src_img, M_xy, dst_domain.size.xy, flags=cv2.INTER_LINEAR), dst_domain  # type: ignore
 
 
 class FlipTransform(AffineTransform):
@@ -798,6 +826,10 @@ class FlipTransform(AffineTransform):
     def is_identity(self) -> bool:
         return not self.horizontal and not self.vertical
 
+    @property
+    def is_yx_independent(self) -> bool:
+        return True
+
     def invert(self) -> Self:
         return self.__class__(self.center, self.horizontal, self.vertical)
 
@@ -812,22 +844,19 @@ class FlipTransform(AffineTransform):
     def transform_inverse(self, dst: FloatPairArrayLike) -> FloatPairArray:
         return self.transform(dst)
 
-    def warp(
-        self,
-        src_img: npt.NDArray[np.uint8 | np.float32],
-        src_origin: Point | tuple[int, int] = (0, 0),
-        warped_domain: Rect | Literal["full", "same"] = "full",
-    ) -> tuple[npt.NDArray[np.uint8 | np.float32], Rect]:
-        warped_domain, src_region, src_region_domain = self.select_warped_region(src_img, src_origin, warped_domain)
-        dst_region_domain = self.transform_domain(src_region_domain)
+    def _warp[DTYPE: np.uint8 | np.float32](
+        self, src_img: npt.NDArray[DTYPE], src_domain: Rect, dst_domain: Rect
+    ) -> tuple[npt.NDArray[DTYPE], Rect]:
+        dst_domain = self.transform_domain(src_domain)
 
+        dst_img = src_img
         if self.horizontal:
-            dst_region = np.fliplr(src_region)
+            dst_img = np.fliplr(src_img)
         if self.vertical:
-            dst_region = np.flipud(src_region)
+            dst_img = np.flipud(src_img)
 
-        dst = warped_domain.crop_pad_image(dst_region, origin=dst_region_domain.top_left, channel_last=True)
-        return dst, warped_domain  # type: ignore
+        dst = dst_domain.crop_pad_image(dst_img, origin=dst_domain.top_left, channel_last=True)
+        return dst, dst_domain  # type: ignore
 
 
 class SimilarityTransform(AffineTransform):
@@ -848,10 +877,7 @@ class SimilarityTransform(AffineTransform):
             The translation vector. If None, it is set to zero. Default is None.
         """  # noqa: E501
         assert s > 0, "s must be positive"
-        if t is not None:
-            self.t = as_float_pair(t)
-        else:
-            self.t = as_float_pair(np.zeros(2))
+        self.t = as_float_pair(t) if t is not None else as_float_pair(np.zeros(2, dtype=np.float64))
         self.r = r
         self.s = s
         super().__init__(SimilarityTransform.rotation_scale_matrix(r, s), self.t)
@@ -905,6 +931,10 @@ class SimilarityTransform(AffineTransform):
     def is_identity(self) -> bool:
         return self.r == 0 and self.s == 1 and bool(np.allclose(self.t, 0))
 
+    @property
+    def is_yx_independent(self) -> bool:
+        return self.r == 0
+
     def invert(self) -> SimilarityTransform:
         """
         Returns the inverse of this similarity transform.
@@ -920,6 +950,10 @@ class SimilarityTransform(AffineTransform):
         """
         return SimilarityTransform(s=1 / self.s, r=-self.r, t=self.transform_inverse(np.zeros(2))[0])
 
+    @overload
+    def compose(self, T1: AffineTransform) -> AffineTransform: ...
+    @overload
+    def compose(self, T1: Transform) -> Transform: ...
     def compose(self, T1: Transform) -> Transform:
         """Composes this similarity transform with another projection model.
         If the other projection model is also a similarity transform, the composition is simplified to a single similarity transform. Otherwise, the composition is returned as a ProjectionComposition.
@@ -971,28 +1005,82 @@ class SimilarityTransform(AffineTransform):
         return (dst - self.t) @ R.T  # type: ignore
 
 
-class ResizeTranslation(SimilarityTransform):
-    def __init__(self, s: float, t: Optional[FloatPairLike] = None) -> None:
+class ResizeTranslation(AffineTransform):
+    t: FloatPair
+    s: FloatPair
+
+    def __init__(self, s: float | FloatPairLike, t: Optional[FloatPairLike] = None) -> None:
         """A projection model that applies a resize and a translation to points: uniformly scaling by s and translating by t.
 
         Parameters
         ----------
-        s : float
+        s : float | FloatPairLike
             The scaling factor. Must be positive.
         t : Optional[FloatPairLike], optional
             The translation vector. If None, it is set to zero. Default is None.
         """  # noqa: E501
-        super().__init__(s=s, r=0, t=t)
+        if isinstance(s, (int, float)):
+            s = (s, s)
+        assert s[0] > 0 and s[1] > 0, "s must be positive"
+
+        self.s = as_float_pair(s)
+        self.t = as_float_pair(t) if t is not None else as_float_pair(np.zeros(2, dtype=np.float64))
+        super().__init__(self.scale_matrix(self.s), self.t)
 
     @classmethod
-    def translate_resize(cls, t: FloatPairLike, s: float) -> Self:
-        t = as_float_pair(t)
-        return cls(s, t * s)
+    def scale_matrix(cls, s: float | FloatPairLike) -> Float2DArray:
+        """Create a scaling matrix for a given scale factor.
+
+        Parameters
+        ----------
+        s : float | FloatPairLike
+            The scaling factor. Must be positive. If a single float is provided, it is used for both dimensions.
+
+        Returns
+        -------
+        Float2DArray
+            The corresponding scaling matrix.
+        """
+        if isinstance(s, (int, float)):
+            s = (s, s)
+        return np.diag(as_float_pair(s))  # type: ignore
 
     @classmethod
-    def fit(cls, src: FloatPairArrayLike, dst: FloatPairArrayLike) -> tuple[Self, float]:
+    def translate_resize(cls, t: FloatPairLike, s: float | FloatPairLike) -> Self:
+        if isinstance(s, (int, float)):
+            s = (s, s)
+        s = as_float_pair(s)
+        return cls(s, as_float_pair(t) * s)
+
+    @classmethod
+    def resize(cls, s: float | FloatPairLike, center: FloatPairLike = (0, 0)) -> Self:
+        if isinstance(s, (int, float)):
+            s = (s, s)
+        s = as_float_pair(s)
+        return cls(s, as_float_pair(center) * (1 - s))
+
+    @classmethod
+    def fit(cls, src: FloatPairArrayLike, dst: FloatPairArrayLike, *, uniform_scale: bool = True) -> tuple[Self, float]:
+        """Fits a resize and translation projection model to a set of corresponding points.
+
+        Parameters
+        ----------
+        src : FloatPairArrayLike
+            The source points coordinates (N x 2) where N is the number of points.
+        dst : FloatPairArrayLike
+            The destination points coordinates (N x 2) where N is the number of points.
+        uniform_scale : bool, optional
+            Whether to use a uniform scale factor for both dimensions. If False, a separate scale factor is computed for each dimension. Default is True.
+
+        Returns
+        -------
+        T : ResizeTranslation
+            The fitted resize and translation projection model.
+        error : float
+            The mean squared error of the fitted model on the provided points.
+
+        """  # noqa: E501
         src, dst = as_float_pairs(src), as_float_pairs(dst)
-        assert src.ndim == 2 and src.shape[1] == 2, "src must be a 2D array of 2D coordinates"
         assert src.shape == dst.shape, "src and dst must have the same shape"
         N = src.shape[0]
         A = np.zeros((2 * N, 3))
@@ -1004,23 +1092,35 @@ class ResizeTranslation(SimilarityTransform):
         b[0::2] = dst[:, 0]
         b[1::2] = dst[:, 1]
         x, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
-        r = x[0]
+        s = (x[0] + x[2]) / 2 if uniform_scale else x[[0, 2]]
         t = x[1:3]
-        error = np.sum((dst - (r * src + t)) ** 2, axis=1)
-        return cls(r, t), np.mean(error)
+        error = np.sum((dst - (s * src + t)) ** 2, axis=1)
+        return cls(s, t), np.mean(error)
 
     def __repr__(self) -> str:
         return f"ResizeTranslateProjection(s={self.s}, t={self.t})"
 
     def __str__(self) -> str:
-        return f"ResizeTranslateProjection(s={self.s}, t={_np_short_str(self.t)})"
+        s = f"{self.s[0]}" if self.s[0] == self.s[1] else f"s={_np_short_str(self.s)}"
+        return f"ResizeTranslateProjection(s={s}, t={_np_short_str(self.t)})"
 
     def invert(self) -> Self:
         return self.__class__(1 / self.s, -self.t / self.s)
 
+    def is_identity(self) -> bool:
+        return bool(np.allclose(self.s, [1.0, 1.0]) and bool(np.allclose(self.t, [0.0, 0.0])))
+
+    @property
+    def is_yx_independent(self) -> bool:
+        return True
+
+    @overload
+    def compose(self, T1: AffineTransform) -> AffineTransform: ...
+    @overload
+    def compose(self, T1: Transform) -> Transform: ...
     def compose(self, T1: Transform) -> Transform:
         if isinstance(T1, ResizeTranslation):
-            return SimilarityTransform(s=self.s * T1.s, t=T1.transform(self.t)[0])
+            return ResizeTranslation(s=self.s * T1.s, t=T1.transform(self.t)[0])
         return super().compose(T1)
 
     def transform(self, src: FloatPairArrayLike) -> FloatPairArray:
@@ -1031,19 +1131,15 @@ class ResizeTranslation(SimilarityTransform):
         dst = as_float_pairs(dst)
         return (dst - self.t) / self.s  # type: ignore
 
-    def warp(
-        self,
-        src_img: npt.NDArray[np.uint8 | np.float32],
-        src_origin: Point | tuple[int, int] = (0, 0),
-        warped_domain: Rect | Literal["full", "same"] = "full",
-    ) -> tuple[npt.NDArray[np.uint8 | np.float32], Rect]:
+    def _warp[DTYPE: np.uint8 | np.float32](
+        self, src_img: npt.NDArray[DTYPE], src_domain: Rect, dst_domain: Rect
+    ) -> tuple[npt.NDArray[DTYPE], Rect]:
         cv2 = import_cv2()
 
-        warped_domain, src_region, src_region_domain = self.select_warped_region(src_img, src_origin, warped_domain)
-        dst_region_domain = self.transform_domain(src_region_domain)
-        dst_region = cv2.resize(src_region, dsize=dst_region_domain.size.xy, fx=self.r, fy=self.r)  # type: ignore
-        dst = warped_domain.crop_pad_image(dst_region, origin=-dst_region_domain.top_left, channel_last=True)
-        return dst, warped_domain  # type: ignore
+        dst_region_domain = self.transform_domain(src_domain)
+        dst_region = cv2.resize(src_img, dsize=dst_domain.size.xy, fx=self.s[1], fy=self.s[0])  # type: ignore
+        dst = dst_domain.crop_pad_image(dst_region, origin=-dst_region_domain.top_left, channel_last=True)
+        return dst, dst_domain  # type: ignore
 
 
 class Translation(ResizeTranslation):
@@ -1112,6 +1208,10 @@ class Translation(ResizeTranslation):
     def transform_inverse(self, dst: FloatPairArrayLike) -> FloatPairArray:
         return as_float_pairs(dst) - self.t  # type: ignore
 
+    @overload
+    def compose(self, T1: AffineTransform) -> AffineTransform: ...
+    @overload
+    def compose(self, T1: Transform) -> Transform: ...
     def compose(self, T1: Transform) -> Transform:
         if isinstance(T1, Translation):
             return Translation(self.t + T1.t)
@@ -1129,16 +1229,11 @@ class Translation(ResizeTranslation):
         t = np.mean(dst - src, axis=0)
         return cls(t), np.mean(np.sum((dst - (src + t)) ** 2, axis=1))
 
-    def warp(
-        self,
-        src_img: npt.NDArray[np.uint8 | np.float32],
-        src_origin: Point | tuple[int, int] = (0, 0),
-        warped_domain: Rect | Literal["full", "same"] = "full",
-    ) -> tuple[npt.NDArray[np.uint8 | np.float32], Rect]:
-        warped_domain, src_region, src_region_domain = self.select_warped_region(src_img, src_origin, warped_domain)
-        dst_region_domain = self.transform_domain(src_region_domain)
-        dst_img = warped_domain.crop_pad_image(src_region, origin=-dst_region_domain.top_left, channel_last=True)
-        return dst_img, warped_domain
+    def _warp[DTYPE: np.uint8 | np.float32](
+        self, src_img: npt.NDArray[DTYPE], src_domain: Rect, dst_domain: Rect
+    ) -> tuple[npt.NDArray[DTYPE], Rect]:
+        dst_img = dst_domain.crop_pad_image(src_img, origin=-src_domain.top_left, channel_last=True)
+        return dst_img, dst_domain
 
 
 class RadialToRadialTransform(Transform):
@@ -1219,6 +1314,10 @@ class RadialToRadialTransform(Transform):
 
     def is_identity(self) -> bool:
         return bool(self.k_src == self.k_dst == 0 and np.allclose(self.H, np.eye(2)) and np.allclose(self.t, 0))
+
+    @property
+    def is_yx_independent(self) -> bool:
+        return bool(np.allclose(self.H[[0, 1], [1, 0]], [0, 0]))
 
     def invert(self) -> Self:
         invH = np.linalg.inv(self.H)
@@ -1441,6 +1540,7 @@ class RadialToRadialTransform(Transform):
         True
 
         """  # noqa: E501
+        from scipy.optimize import least_squares as scipy_least_squares
 
         src = as_float_pairs(src)
         dst = as_float_pairs(dst)
@@ -1547,7 +1647,8 @@ class QuadraticTransform(Transform):
         return False
 
     @classmethod
-    def fit(cls, src: FloatPairArray, dst: FloatPairArray) -> tuple[Self, float]:
+    def fit(cls, src: FloatPairArrayLike, dst: FloatPairArrayLike) -> tuple[Self, float]:
+        src, dst = as_float_pairs(src), as_float_pairs(dst)
         src_y = src[:, 0]
         src_x = src[:, 1]
         src_ = np.stack((src_y**2, src_x**2, src_x * src_y, src_y, src_x, np.ones((src.shape[0],))), axis=1)
@@ -1601,7 +1702,8 @@ class QuadraticTransform(Transform):
 
         return x
 
-    def transform_inverse(self, dst: FloatPairArray) -> FloatPairArray:
+    def transform_inverse(self, dst: FloatPairArrayLike) -> FloatPairArray:
+        dst = as_float_pairs(dst)
         if self._inverse_transform is False:
             self._inverse_transform = self._eval_inverse_transform()
         if self._inverse_transform is None:
@@ -1660,16 +1762,18 @@ class ElasticTransform(Transform):
         return cls(disp_map, reversed=reversed)
 
     @classmethod
-    def fit(cls, src: npt.NDArray[np.floating], dst: npt.NDArray[np.floating]) -> tuple[Self, float]:
+    def fit(cls, src: FloatPairArrayLike, dst: FloatPairArrayLike) -> tuple[Self, float]:
         raise NotImplementedError("ElasticProjection does not implement the 'fit' method")
 
     def invert(self) -> Self:
         return type(self)(self.displacement, reversed=not self.reversed)
 
-    def transform(self, src: FloatPairArray) -> FloatPairArray:
+    def transform(self, src: FloatPairArrayLike) -> FloatPairArray:
+        src = as_float_pairs(src)
         return self._transform(self.displacement, src, reversed=self.reversed)
 
-    def transform_inverse(self, dst: FloatPairArray) -> FloatPairArray:
+    def transform_inverse(self, dst: FloatPairArrayLike) -> FloatPairArray:
+        dst = as_float_pairs(dst)
         return self._transform(self.displacement, dst, reversed=not self.reversed)
 
     @classmethod
@@ -1677,6 +1781,8 @@ class ElasticTransform(Transform):
         cls, displacement: FloatPairMap, src: SRC_TYPE | None = None, reversed: bool = False
     ) -> SRC_TYPE:
         try:
+            import torch
+
             from fundus_vessels_toolkit.utils.cpp_extensions.fvt_cpp import (
                 inverse_displacement,
                 vec_bilinear_interpolate,
@@ -1708,19 +1814,14 @@ class ElasticTransform(Transform):
 
         return src + inv_d.reshape(src_.shape)
 
-    def warp(
-        self,
-        src_img: npt.NDArray[np.uint8 | np.float32],
-        src_top_left: Point | tuple[int, int] = (0, 0),
-        warped_domain: Rect | Literal["full", "same"] = "full",
-    ) -> tuple[npt.NDArray[np.uint8 | np.float32], Rect]:
+    def _warp[DTYPE: np.uint8 | np.float32](
+        self, src_img: npt.NDArray[DTYPE], src_domain: Rect, dst_domain: Rect
+    ) -> tuple[npt.NDArray[DTYPE], Rect]:
         cv2 = import_cv2()
 
-        warped_domain = self.warped_domain(src_img, src_top_left, warped_domain)
-        src_remap = self._transform(
-            self.displacement, src=warped_domain.grid_indices(), reversed=not self.reversed
-        ).astype(np.float32)
-        return cv2.remap(src_img, src_remap[..., ::-1], None, cv2.INTER_LINEAR), warped_domain  # type: ignore
+        src_remap = self._transform(self.displacement, src=dst_domain.grid_indices(), reversed=not self.reversed)
+        src_remap = src_remap.astype(np.float32) - src_domain.top_left.numpy()
+        return cv2.remap(src_img, src_remap[..., ::-1], None, cv2.INTER_LINEAR), dst_domain  # type: ignore
 
 
 GAUSSIAN_KERNEL_5x5: npt.NDArray[np.float32] = (

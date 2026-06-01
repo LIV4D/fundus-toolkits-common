@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Literal, Optional, Self, Tuple, TypeAlias, Typ
 import numpy as np
 import numpy.typing as npt
 
+from .transform import AffineTransform, ResizeTranslation, SimilarityTransform, Transform
 from .utils.data_io import most_common_image_ext
 from .utils.geometric import Point, Rect
 from .utils.image import (
@@ -234,7 +235,7 @@ class FundusData:
     @classmethod
     def empty_like(cls, data: ImageSource) -> Self:
         """Convert the given data to a fundus image format (numpy array of shape (3, H, W) and type float32)."""
-        name = ...
+        name = None
         if isinstance(data, str):
             name = Path(data).stem
         elif isinstance(data, Path):
@@ -305,7 +306,7 @@ class FundusData:
         ------
         RuntimeError
             If inplace is True and this FundusData is immutable.
-        """
+        """  # noqa: E501
         if inplace:
             if self._immutable:
                 raise RuntimeError("This FundusData instance is immutable.")
@@ -325,7 +326,7 @@ class FundusData:
         def roi_crop(img):
             if roi is None:
                 return img
-            return Rect.from_size(img.shape).crop_pad_image(img, dst=roi, dst_shape=self.shape)
+            return Rect.from_size(self.shape).crop_pad_image(img)
 
         if image is not ...:
             other._image = roi_crop(other.load_fundus_image(image, **shape_opts))
@@ -403,12 +404,12 @@ class FundusData:
     @classmethod
     def from_folders(
         cls,
-        image: PathLike | Ellipsis = ...,
-        roi_mask: PathLike | Ellipsis = ...,
-        vessels: PathLike | Ellipsis = ...,
-        av: PathLike | Ellipsis = ...,
-        od: PathLike | Ellipsis = ...,
-        macula: PathLike | Ellipsis = ...,
+        image: PathLike | EllipsisType = ...,
+        roi_mask: PathLike | EllipsisType = ...,
+        vessels: PathLike | EllipsisType = ...,
+        av: PathLike | EllipsisType = ...,
+        od: PathLike | EllipsisType = ...,
+        macula: PathLike | EllipsisType = ...,
     ) -> Generator[Self]:
         """Load fundus data from folders containing the different modalities. Each folder must contain files with the same name.
 
@@ -1081,7 +1082,7 @@ class FundusData:
         -------
         npt.NDArray[bool]
             A binary mask of the same shape as the fundus image, where True values correspond to pixels in the defined region.
-        """
+        """  # noqa: E501
         if mask_roi is None:
             mask_roi = self.has_roi_mask
         mask = np.ones(self.shape, bool) if not mask_roi else self.roi_mask
@@ -1322,6 +1323,53 @@ class FundusData:
     ####################################################################################################################
     #    === Utilities ===
     ####################################################################################################################
+    def transform(
+        self,
+        transform: Transform,
+        src_top_left: Point | tuple[int, int] = (0, 0),
+        dst_domain: Rect | Literal["full", "same"] = "full",
+    ) -> Self:
+        """Apply a geometric transformation to the fundus image and the vessels segmentation."""
+        other = copy(self)
+        dst_domain = transform.warped_domain(self.shape, src_top_left, dst_domain)
+
+        if self._image is not None:
+            other._image = transform.warp(self._image, src_top_left, dst_domain)
+        if self._roi_mask is not None:
+            other._roi_mask = transform.warp(self._roi_mask, src_top_left, dst_domain)
+        if self._vessels is not None:
+            other._vessels = transform.warp(self._vessels, src_top_left, dst_domain)
+        if self._av is not None:
+            other._av = transform.warp(self._av, src_top_left, dst_domain)
+        if self._od is not None:
+            other._od = transform.warp(self._od, src_top_left, dst_domain)
+        if self._macula is not None:
+            other._macula = transform.warp(self._macula, src_top_left, dst_domain)
+        if self._od_center not in (None, ABSENT):
+            other._od_center = transform.transform(self._od_center + src_top_left) - dst_domain.top_left
+        if self._od_size not in (None, ABSENT):
+            # Sample 20 points on the OD ellipse and transform them to get the new size of the OD
+            assert self._od_center is not None and self._od_size is not None
+
+            if transform.is_yx_independent:
+                od_rect = Rect.from_center(self._od_center, self._od_size)
+                od_rect = transform.transform_domain(od_rect)
+                other._od_size = od_rect.size
+            else:
+                theta = np.linspace(0, 2 * np.pi, 30, endpoint=False)
+                od_y = self._od_center.y + self._od_size.y * np.sin(theta)
+                od_x = self._od_center.x + self._od_size.x * np.cos(theta)
+                od_yx = np.stack((od_y, od_x), axis=-1)
+                od_yx = transform.transform(od_yx + src_top_left) - dst_domain.top_left
+                od_h = od_yx[:, 0].max() - od_yx[:, 0].min()
+                od_w = od_yx[:, 1].max() - od_yx[:, 1].min()
+                other._od_size = Point(od_h, od_w)
+
+        if self._macula_center not in (None, ABSENT):
+            other._macula_center = transform.transform(self._macula_center + src_top_left) - dst_domain.top_left
+
+        return other
+
     def rotate(self, angle: float) -> Self:
         """Rotate the fundus image and the vessels segmentation by a given angle.
         Parameters
@@ -1333,23 +1381,8 @@ class FundusData:
             FundusData
                 The rotated fundus image and vessels segmentation.
         """
-        from .utils.image import rotate
-
-        other = copy(self)
-
-        if self._image is not None:
-            other._image = rotate(self._image, angle)
-        if self._roi_mask is not None:
-            other._roi_mask = rotate(self._roi_mask, angle)
-        if self._vessels is not None:
-            other._vessels = rotate(self._vessels, angle)
-        if self._av is not None:
-            other._av = rotate(self._av, angle)
-        if self._od is not None:
-            other._od = rotate(self._od, angle)
-        if self._macula is not None:
-            other._macula = rotate(self._macula, angle)
-        return other
+        h, w = self.shape
+        return self.transform(AffineTransform.rotate(theta=angle, center=(h / 2, w / 2)), dst_domain="same")
 
     def resize(self, size: float | int | Tuple[int, int]) -> Self:
         """Rescale the fundus image and the vessels segmentation to a given size.
@@ -1365,8 +1398,6 @@ class FundusData:
             FundusData
                 The rescaled fundus image and vessels segmentation.
         """
-        from .utils.image import resize
-
         if isinstance(size, tuple):
             shape = size
         ratio = self.shape[0] / self.shape[1]
@@ -1378,36 +1409,11 @@ class FundusData:
         else:
             raise
 
-        r = Point(shape[0] / self.shape[0], shape[1] / self.shape[1])
+        s = Point(shape[0] / self.shape[0], shape[1] / self.shape[1])
 
-        other = copy(self)
-        other._shape = shape
-        if self._image is not None:
-            other._image = resize(self._image, shape, interpolation=True)
-        if self._roi_mask is not None:
-            other._roi_mask = resize(self._roi_mask, shape, interpolation=True)
-        if self._vessels is not None:
-            other._vessels = resize(self._vessels, shape, interpolation=True)
-        if self._av is not None:
-            av = resize(self._av, shape, interpolation=False)
-            if other._vessels is not None:
-                av *= other._vessels
-            other._av = av
-            # TODO: Smooth av boundaries (right now, only vessel_mask is smoothed)
+        return self.transform(ResizeTranslation.resize(s=s), dst_domain=Rect.from_size(shape))
 
-        if self._od is not None:
-            other._od = resize(self._od, shape, interpolation=True)
-        if self._od_center is not None:
-            other._od_center = other._od_center * r
-        if self._od_size is not None and self._od_size is not ABSENT:
-            other._od_size = other._od_size * r
-        if self._macula_center is not None:
-            other._macula_center = other._macula_center * r
-        if self._macula is not None:
-            other._macula = resize(self._macula, shape, interpolation=True)
-        return other
-
-    def crop(self, rect: Rect) -> Self:
+    def crop(self, roi: Rect) -> Self:
         """Crop the fundus image and the vessels segmentation to a given rectangle.
 
         Parameters
@@ -1420,26 +1426,27 @@ class FundusData:
             FundusData
                 The cropped fundus image and vessels segmentation.
         """
-        src, dst = rect.crop_pad_slices(src_shape=self.shape)
 
-        def crop_center(array: npt.NDArray) -> npt.NDArray:
-            result = np.zeros(dtype=array.dtype, shape=array.shape[:-2] + rect.shape)
-            result[..., *dst] = array[..., *src]
-            return result
+        def crop_roi(array: npt.NDArray) -> npt.NDArray:
+            return roi.crop_pad_image(array)
 
         updated_data = {}
         if self._image is not None:
-            updated_data["image"] = crop_center(self._image)
+            updated_data["image"] = crop_roi(self._image)
         if self._roi_mask is not None:
-            updated_data["roi_mask"] = crop_center(self._roi_mask)
+            updated_data["roi_mask"] = crop_roi(self._roi_mask)
         if self._vessels is not None:
-            updated_data["vessels"] = crop_center(self._vessels)
+            updated_data["vessels"] = crop_roi(self._vessels)
         if self._av is not None:
-            updated_data["av"] = crop_center(self._av)
+            updated_data["av"] = crop_roi(self._av)
         if self._od is not None:
-            updated_data["od"] = crop_center(self._od)
+            updated_data["od"] = crop_roi(self._od)
         if self._macula is not None:
-            updated_data["macula"] = crop_center(self._macula)
+            updated_data["macula"] = crop_roi(self._macula)
+        if self._od_center not in (None, ABSENT):
+            updated_data["_od_center"] = self._od_center - roi.top_left
+        if self._macula_center not in (None, ABSENT):
+            updated_data["_macula_center"] = self._macula_center - roi.top_left
         return self.__class__(**updated_data, name=self._name, immutable=self._immutable)
 
     def uncrop(self, roi: Rect, dst_shape: tuple[int, int]) -> Self:
@@ -1457,26 +1464,27 @@ class FundusData:
             FundusData
                 The uncropped fundus image and vessels segmentation.
         """
-        src, dst = roi.crop_pad_slices(dst_shape=dst_shape)
 
-        def uncrop_center(array: npt.NDArray) -> npt.NDArray:
-            result = np.zeros(dtype=array.dtype, shape=array.shape[:-2] + dst_shape)
-            result[..., *src] = array[..., *dst]
-            return result
+        def uncrop_roi(array: npt.NDArray) -> npt.NDArray:
+            return Rect.from_size(dst_shape).crop_pad_image(array, origin=-roi.top_right)
 
         updated_data = {}
         if self._image is not None:
-            updated_data["image"] = uncrop_center(self._image)
+            updated_data["image"] = uncrop_roi(self._image)
         if self._roi_mask is not None:
-            updated_data["roi_mask"] = uncrop_center(self._roi_mask)
+            updated_data["roi_mask"] = uncrop_roi(self._roi_mask)
         if self._vessels is not None:
-            updated_data["vessels"] = uncrop_center(self._vessels)
+            updated_data["vessels"] = uncrop_roi(self._vessels)
         if self._av is not None:
-            updated_data["av"] = uncrop_center(self._av)
+            updated_data["av"] = uncrop_roi(self._av)
         if self._od is not None:
-            updated_data["od"] = uncrop_center(self._od)
+            updated_data["od"] = uncrop_roi(self._od)
         if self._macula is not None:
-            updated_data["macula"] = uncrop_center(self._macula)
+            updated_data["macula"] = uncrop_roi(self._macula)
+        if self._od_center not in (None, ABSENT):
+            updated_data["_od_center"] = self._od_center + roi.top_left
+        if self._macula_center not in (None, ABSENT):
+            updated_data["_macula_center"] = self._macula_center + roi.top_left
         return self.__class__(**updated_data, name=self._name, immutable=self._immutable)
 
     @overload
