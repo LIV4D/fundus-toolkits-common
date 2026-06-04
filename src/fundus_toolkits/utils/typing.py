@@ -97,6 +97,7 @@ type FloatPairArrayLike = (
     | dict[int, float]
 )
 type FloatPairMap = np.ndarray[tuple[int, int, Literal[2]], np.dtype[np.float64]]
+type Float32PairMap = np.ndarray[tuple[int, int, Literal[2]], np.dtype[np.float32]]
 type FloatPairVolume = np.ndarray[tuple[int, int, int, Literal[2]], np.dtype[np.float64]]
 type PointArray = FloatPairArray
 type PointArrayLike = FloatPairArrayLike

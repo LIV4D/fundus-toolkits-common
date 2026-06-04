@@ -21,6 +21,7 @@ from .utils.typing import (
     FloatPairArrayLike,
     FloatPairLike,
     FloatPairMap,
+    Float32PairMap,
     Indices,
     as_float_2d,
     as_float_pair,
@@ -349,7 +350,9 @@ class Transform(abc.ABC):
     ) -> tuple[npt.NDArray[DTYPE], Rect]:
         cv2 = import_cv2()
 
-        src_remap = self.transform_inverse(dst_domain.grid_indices().astype(np.float32)) - src_domain.top_left.numpy()
+        dst_grid = dst_domain.grid_indices().astype(np.float32).reshape(-1, 2)
+        src_remap = self.transform_inverse(dst_grid) - src_domain.top_left.numpy()
+        src_remap = src_remap.reshape(dst_domain.h, dst_domain.w, 2).astype(np.float32)
         return cv2.remap(src_img, src_remap[..., ::-1], None, cv2.INTER_LINEAR), dst_domain  # type: ignore
 
     def warped_domain(
@@ -1712,8 +1715,8 @@ class QuadraticTransform(Transform):
 
 
 class ElasticTransform(Transform):
-    def __init__(self, displacement: FloatPairMap, reversed: bool = False) -> None:
-        displacement = np.asarray(displacement, dtype=np.float64)  # type: ignore
+    def __init__(self, displacement: Float32PairMap, reversed: bool = False) -> None:
+        displacement = np.asarray(displacement, dtype=np.float32)  # type: ignore
         assert displacement.ndim == 3 and displacement.shape[2] == 2, "displacement must be a 2D map of 2D vectors"
         self.displacement = displacement
 
@@ -1747,13 +1750,12 @@ class ElasticTransform(Transform):
             smoothing_size = None
         subsampling = smoothing_size // 2 if smoothing_size is not None else 1
         disp_map_shape = (int(shape[0] // subsampling), int(shape[1] // subsampling), 2)
-        disp_map: FloatPairMap = rng.normal(0, displacement_std, size=disp_map_shape)  # type: ignore
-        disp_map = disp_map.astype(np.float64)
+        disp_map: Float32PairMap = rng.normal(0, displacement_std, size=disp_map_shape).astype(np.float32)  # type: ignore
         if smoothing_size is not None:
             cv2 = import_cv2()
 
             kernel = GAUSSIAN_KERNEL_5x5
-            disp_map_: FloatPairMap = np.empty(shape + (2,), dtype=disp_map.dtype)  # type: ignore
+            disp_map_: Float32PairMap = np.empty(shape + (2,), dtype=np.float32)
             for i in range(2):
                 smooth_disp = cv2.filter2D(disp_map[..., i], -1, kernel, borderType=cv2.BORDER_REPLICATE)
                 disp_map_[..., i] = cv2.resize(smooth_disp, dsize=shape[::-1], interpolation=cv2.INTER_LINEAR)
@@ -1778,7 +1780,7 @@ class ElasticTransform(Transform):
 
     @classmethod
     def _transform[SRC_TYPE: npt.NDArray](
-        cls, displacement: FloatPairMap, src: SRC_TYPE | None = None, reversed: bool = False
+        cls, displacement: Float32PairMap, src: SRC_TYPE | None = None, reversed: bool = False
     ) -> SRC_TYPE:
         try:
             import torch
@@ -1791,7 +1793,15 @@ class ElasticTransform(Transform):
             raise ImportError("ElasticTransform requires the 'fvt_cpp' extension module to be installed") from None
         disp_t = torch.from_numpy(displacement)
 
-        if not reversed:
+        if reversed:
+            src_ = np.indices(displacement.shape[:2]).transpose(1, 2, 0) if src is None else src
+            src_t = torch.from_numpy(src_.astype(np.float32)).reshape(-1, 2)
+
+            # Inverse displacement field through fixed-point iteration
+            inv_d = inverse_displacement(disp_t, src_t, 50, 0.5).numpy()
+
+            return src + inv_d.reshape(src_.shape)
+        else:
 
             def interp_displacement(pos: FloatPairMap) -> FloatPairMap:
                 pos_t = torch.from_numpy(pos).reshape(-1, 2)
@@ -1804,15 +1814,7 @@ class ElasticTransform(Transform):
                 src[..., 1] = np.clip(src[..., 1], 0, displacement.shape[1] - 1)
                 return src + displacement[src[..., 0], src[..., 1]]  # type: ignore
             else:
-                return src + interp_displacement(src.astype(np.float32))  # type: ignore
-
-        src_ = np.indices(displacement.shape[:2]).transpose(1, 2, 0) if src is None else src
-        src_t = torch.from_numpy(src_.astype(np.float32)).reshape(-1, 2)
-
-        # Inverse displacement field through fixed-point iteration
-        inv_d = inverse_displacement(disp_t, src_t, 50, 0.5).numpy()
-
-        return src + inv_d.reshape(src_.shape)
+                return src + interp_displacement(src.astype(np.float32))
 
     def _warp[DTYPE: np.uint8 | np.float32](
         self, src_img: npt.NDArray[DTYPE], src_domain: Rect, dst_domain: Rect
@@ -1820,7 +1822,7 @@ class ElasticTransform(Transform):
         cv2 = import_cv2()
 
         src_remap = self._transform(self.displacement, src=dst_domain.grid_indices(), reversed=not self.reversed)
-        src_remap = src_remap.astype(np.float32) - src_domain.top_left.numpy()
+        src_remap = src_remap.astype(np.float32) - src_domain.top_left.numpy().astype(np.float32)
         return cv2.remap(src_img, src_remap[..., ::-1], None, cv2.INTER_LINEAR), dst_domain  # type: ignore
 
 
