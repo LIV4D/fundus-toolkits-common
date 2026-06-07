@@ -31,9 +31,9 @@ type FloatArrayLike = npt.NDArray[np.floating] | float | RecursiveFloatlist
 type Float1DArray = np.ndarray[tuple[int], np.dtype[np.float64]]
 type Float2DArray = np.ndarray[tuple[int, int], np.dtype[np.float64]]
 type Float3DArray = np.ndarray[tuple[int, int, int], np.dtype[np.float64]]
-type Float1DArrayLike = npt.NDArray[np.floating] | float | list[float]
-type Float2DArrayLike = npt.NDArray[np.floating] | list[float] | list[list[float]]
-type Float3DArrayLike = npt.NDArray[np.floating] | list[list[float]] | list[list[list[float]]]
+type Float1DArrayLike = npt.NDArray[np.floating] | float | list[float] | Int1DArrayLike
+type Float2DArrayLike = npt.NDArray[np.floating] | list[float] | list[list[float]] | Int2DArrayLike
+type Float3DArrayLike = npt.NDArray[np.floating] | list[list[float]] | list[list[list[float]]] | Int3DArrayLike
 
 
 def as_float_1d(arr: Float1DArrayLike) -> Float1DArray:
@@ -85,16 +85,16 @@ def as_int_3d(arr: Int3DArrayLike) -> Int3DArray:
 
 
 type FloatPair = np.ndarray[tuple[Literal[2]], np.dtype[np.float64]]
-type FloatPairLike = tuple[float, float] | list[float] | npt.NDArray[np.floating]
+type FloatPairLike = tuple[float | int, float | int] | list[float | int] | npt.NDArray[np.floating | np.integer]
 
 type FloatPairArray = np.ndarray[tuple[int, Literal[2]], np.dtype[np.float64]]
 type FloatPairArrayLike = (
-    npt.NDArray[np.floating]
-    | list[float]
-    | list[list[float]]
-    | tuple[float, float]
-    | Sequence[tuple[float, float]]
-    | dict[int, float]
+    npt.NDArray[np.floating | np.integer]
+    | list[float | int]
+    | list[list[float | int]]
+    | tuple[float | int, float | int]
+    | Sequence[tuple[float | int, float | int]]
+    | dict[int, float | int]
 )
 type FloatPairMap = np.ndarray[tuple[int, int, Literal[2]], np.dtype[np.float64]]
 type Float32PairMap = np.ndarray[tuple[int, int, Literal[2]], np.dtype[np.float32]]
@@ -102,6 +102,7 @@ type FloatPairVolume = np.ndarray[tuple[int, int, int, Literal[2]], np.dtype[np.
 type PointArray = FloatPairArray
 type PointArrayLike = FloatPairArrayLike
 
+type IntPair = np.ndarray[tuple[Literal[2]], np.dtype[np.int_]]
 type IntPairArray = np.ndarray[tuple[int, Literal[2]], np.dtype[np.int_]]
 type IntPairArrayLike = (
     npt.NDArray[np.integer] | list[int] | list[list[int]] | tuple[int, int] | Sequence[tuple[int, int]] | dict[int, int]
