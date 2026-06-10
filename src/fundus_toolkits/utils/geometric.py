@@ -3,10 +3,13 @@ from __future__ import annotations
 import math
 from functools import reduce
 from types import EllipsisType
-from typing import Iterable, List, Literal, NamedTuple, Optional, TypeGuard, overload
+from typing import Iterable, List, Literal, NamedTuple, Optional, TypeGuard, overload, TYPE_CHECKING
 
 import numpy as np
-import numpy.typing as npt
+
+if TYPE_CHECKING:
+    import numpy.typing as npt
+    import torch
 
 
 class Rect(NamedTuple):
@@ -320,6 +323,48 @@ class Rect(NamedTuple):
         if channel_last and dst_image.ndim == 3:
             dst_image = dst_image.transpose(1, 2, 0)
         return dst_image
+
+    def crop_pad_tensor(
+        self, tensor: torch.Tensor, origin: Optional[Point | tuple[int, int]] = None, *, channel_last: bool = False
+    ) -> torch.Tensor:
+        """Crop/pad a tensor accordingly to this rectangle.
+
+        Parameters
+        ----------
+        tensor : torch.Tensor
+            The tensor to crop/pad with shape [..., height, width].
+
+        origin : Point | None
+            The origin of the coordinates system in the tensor. If None, assume that the origin is at (0, 0).
+
+        channel_last : bool, optional
+            If True, the input tensor should have shape [height, width, C] and the output tensor will have shape [height, width, C].
+
+        Returns
+        -------
+        torch.Tensor
+            The cropped/padded tensor.
+
+        Raises
+        ------
+        TypeError
+            If the input is not a Rect or a tuple of 2 integers.
+        """
+        import torch
+
+        if channel_last and tensor.ndim == 3:
+            tensor = tensor.permute(2, 0, 1)
+
+        src_domain = Rect.from_size(tensor.shape[-2:])
+        if origin is not None:
+            src_domain -= Point.parse(origin)
+        src_slice, dst_slice = crop_pad_slices(src_domain, self, prefix_ellipsis=True)
+
+        dst_tensor = torch.zeros(tensor.shape[:-2] + self.shape, dtype=tensor.dtype, device=tensor.device)
+        dst_tensor[dst_slice] = tensor[src_slice]
+        if channel_last and dst_tensor.ndim == 3:
+            dst_tensor = dst_tensor.permute(1, 2, 0)
+        return dst_tensor
 
     def grid_indices(self) -> npt.NDArray[np.int_]:
         """Get the grid indices of the rectangle as an array of shape (h, w, 2)"""
