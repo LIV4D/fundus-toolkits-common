@@ -286,6 +286,7 @@ class Rect(NamedTuple):
         origin: Optional[Point | tuple[int, int]] = None,
         *,
         channel_last: bool = False,
+        copy=True,
     ) -> npt.NDArray[T]:
         """Crop/pad an image accordingly to this rectangle.
 
@@ -299,6 +300,9 @@ class Rect(NamedTuple):
 
         channel_last : bool, optional
             If True, the input image should have shape [height, width, C] and the output image will have shape [height, width, C].
+
+        copy : bool, optional
+            If True, return a copy of the image. Otherwise, may return a view.
 
         Returns
         -------
@@ -318,14 +322,22 @@ class Rect(NamedTuple):
             src_domain -= Point.parse(origin)
         src_slice, dst_slice = crop_pad_slices(src_domain, self, prefix_ellipsis=True)
 
-        dst_image = np.zeros(image.shape[:-2] + self.shape, dtype=image.dtype)
-        dst_image[dst_slice] = image[src_slice]
+        if copy or not src_domain.contains(self):
+            dst_image = np.zeros(image.shape[:-2] + self.shape, dtype=image.dtype)
+            dst_image[dst_slice] = image[src_slice]
+        else:
+            dst_image = image[src_slice]
         if channel_last and dst_image.ndim == 3:
             dst_image = dst_image.transpose(1, 2, 0)
         return dst_image
 
     def crop_pad_tensor(
-        self, tensor: torch.Tensor, origin: Optional[Point | tuple[int, int]] = None, *, channel_last: bool = False
+        self,
+        tensor: torch.Tensor,
+        origin: Optional[Point | tuple[int, int]] = None,
+        *,
+        channel_last: bool = False,
+        copy=True,
     ) -> torch.Tensor:
         """Crop/pad a tensor accordingly to this rectangle.
 
@@ -339,6 +351,9 @@ class Rect(NamedTuple):
 
         channel_last : bool, optional
             If True, the input tensor should have shape [height, width, C] and the output tensor will have shape [height, width, C].
+
+        copy : bool, optional
+            If True, return a copy of the tensor. Otherwise, may return a view.
 
         Returns
         -------
@@ -360,18 +375,27 @@ class Rect(NamedTuple):
             src_domain -= Point.parse(origin)
         src_slice, dst_slice = crop_pad_slices(src_domain, self, prefix_ellipsis=True)
 
-        dst_tensor = torch.zeros(tensor.shape[:-2] + self.shape, dtype=tensor.dtype, device=tensor.device)
-        dst_tensor[dst_slice] = tensor[src_slice]
+        if copy or not src_domain.contains(self):
+            dst_tensor = torch.zeros(tensor.shape[:-2] + self.shape, dtype=tensor.dtype, device=tensor.device)
+            dst_tensor[dst_slice] = tensor[src_slice]
+        else:
+            dst_tensor = tensor[src_slice]
         if channel_last and dst_tensor.ndim == 3:
             dst_tensor = dst_tensor.permute(1, 2, 0)
         return dst_tensor
 
-    def grid_indices(self) -> npt.NDArray[np.int_]:
+    def grid_indices(self, dtype=np.int_) -> npt.NDArray[np.int_]:
         """Get the grid indices of the rectangle as an array of shape (h, w, 2)"""
+        h = int(math.ceil(self.h))
+        w = int(math.ceil(self.w))
+        y = int(math.floor(self.y))
+        x = int(math.floor(self.x))
         yy, xx = np.meshgrid(
-            np.arange(int(math.ceil(self.h))) + self.y,
-            np.arange(int(math.ceil(self.w))) + self.x,
+            np.arange(y, y + h, dtype=dtype),
+            np.arange(x, x + w, dtype=dtype),
             indexing="ij",
+            copy=False,
+            sparse=False,
         )
         return np.stack((yy, xx), axis=-1)
 

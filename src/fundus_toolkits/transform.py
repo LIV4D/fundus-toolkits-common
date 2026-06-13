@@ -353,7 +353,7 @@ class Transform(abc.ABC):
     ) -> tuple[npt.NDArray[DTYPE], Rect]:
         cv2 = import_cv2()
 
-        dst_grid = dst_domain.grid_indices().astype(np.float32).reshape(-1, 2)
+        dst_grid = dst_domain.grid_indices(dtype=np.float32).reshape(-1, 2)
         src_remap = self.transform_inverse(dst_grid) - src_domain.top_left.numpy()
         src_remap = src_remap.reshape(dst_domain.h, dst_domain.w, 2).astype(np.float32)
         return cv2.remap(src_img, src_remap[..., ::-1], None, cv2.INTER_LINEAR), dst_domain  # type: ignore
@@ -431,11 +431,11 @@ class Transform(abc.ABC):
         elif warped_domain == "same":
             warped_domain = src_domain
 
-        src_region_domain = self.inverse_transform_domain(warped_domain)  # & src_domain
+        src_region_domain = self.inverse_transform_domain(warped_domain) & src_domain
         if isinstance(src_img, torch.Tensor):
-            src_region = src_region_domain.crop_pad_tensor(src_img, origin=src_origin, channel_last=True)
+            src_region = src_region_domain.crop_pad_tensor(src_img, origin=src_origin, channel_last=True, copy=False)
         else:
-            src_region = src_region_domain.crop_pad_image(src_img, origin=src_origin, channel_last=True)
+            src_region = src_region_domain.crop_pad_image(src_img, origin=src_origin, channel_last=True, copy=False)
         return warped_domain, src_region, src_region_domain
 
     def draw_grid(
@@ -674,7 +674,7 @@ class IdentityTransform(Transform):
     def _warp[DTYPE: np.uint8 | np.float32](
         self, src_img: npt.NDArray[DTYPE], src_domain: Rect, dst_domain: Rect
     ) -> tuple[npt.NDArray[DTYPE], Rect]:
-        dst_img = dst_domain.crop_pad_image(src_img, origin=-src_domain.top_left, channel_last=True)
+        dst_img = dst_domain.crop_pad_image(src_img, origin=-src_domain.top_left, channel_last=True, copy=False)
         return dst_img, dst_domain
 
 
@@ -875,7 +875,7 @@ class FlipTransform(AffineTransform):
         if self.vertical:
             dst_img = np.flipud(src_img)
 
-        dst = dst_domain.crop_pad_image(dst_img, origin=dst_domain.top_left, channel_last=True)
+        dst = dst_domain.crop_pad_image(dst_img, origin=dst_domain.top_left, channel_last=True, copy=False)
         return dst, dst_domain  # type: ignore
 
 
@@ -1158,7 +1158,7 @@ class ResizeTranslation(AffineTransform):
 
         dst_region_domain = self.transform_domain(src_domain)
         dst_region = cv2.resize(src_img, dsize=dst_domain.size.xy, fx=self.s[1], fy=self.s[0])  # type: ignore
-        dst = dst_domain.crop_pad_image(dst_region, origin=-dst_region_domain.top_left, channel_last=True)
+        dst = dst_domain.crop_pad_image(dst_region, origin=-dst_region_domain.top_left, channel_last=True, copy=False)
         return dst, dst_domain  # type: ignore
 
 
@@ -1252,7 +1252,7 @@ class Translation(ResizeTranslation):
     def _warp[DTYPE: np.uint8 | np.float32](
         self, src_img: npt.NDArray[DTYPE], src_domain: Rect, dst_domain: Rect
     ) -> tuple[npt.NDArray[DTYPE], Rect]:
-        dst_img = dst_domain.crop_pad_image(src_img, origin=-src_domain.top_left, channel_last=True)
+        dst_img = dst_domain.crop_pad_image(src_img, origin=-src_domain.top_left, channel_last=True, copy=False)
         return dst_img, dst_domain
 
 
@@ -1731,146 +1731,6 @@ class QuadraticTransform(Transform):
         return self._inverse_transform.transform(dst)
 
 
-class ElasticTransformTorch(Transform):
-    def __init__(self, displacement: torch.Tensor, reversed: bool = False) -> None:
-        assert displacement.ndim == 3 and displacement.shape[0] == 2, "displacement must be a 2D map of 2D vectors"
-        self.displacement = displacement
-
-        self.reversed = reversed
-        super().__init__()
-
-    def __repr__(self) -> str:
-        return f"ElasticProjection(displacement: {self.displacement.shape})"
-
-    def __str__(self) -> str:
-        return "Elastic"
-
-    def __eq__(self, value: object) -> bool:
-        if not isinstance(value, ElasticTransformTorch):
-            return False
-        return bool(torch.allclose(self.displacement, value.displacement) and self.reversed == value.reversed)
-
-    @classmethod
-    def random(
-        cls,
-        shape: tuple[int, int],
-        displacement_std: float = 10,
-        smoothing_size: Optional[float] = 2,
-        *,
-        rng: Optional[torch.Generator] = None,
-        reversed: bool = True,
-        cuda: bool = False,
-    ) -> Self:
-        device = torch.device("cuda") if cuda else torch.device("cpu")
-        if smoothing_size is not None and smoothing_size <= 0:
-            smoothing_size = None
-        subsampling = smoothing_size // 2 if smoothing_size is not None else 1
-        disp_map_shape = (2, int(shape[0] // subsampling), int(shape[1] // subsampling))
-        disp_map = torch.normal(
-            0, displacement_std, size=disp_map_shape, generator=rng, dtype=torch.float32, device=device
-        )
-        if smoothing_size is not None:
-            global GAUSSIAN_KERNEL_5x5_TORCH
-            if cuda != (GAUSSIAN_KERNEL_5x5_TORCH.device.type == "cuda"):
-                GAUSSIAN_KERNEL_5x5_TORCH = GAUSSIAN_KERNEL_5x5_TORCH.to(device)
-            disp_map = F.conv2d(disp_map[:, None, :, :], GAUSSIAN_KERNEL_5x5_TORCH[None, None, :, :], padding="same")
-            disp_map = F.interpolate(disp_map, size=shape, mode="bicubic").squeeze(1)
-        return cls(disp_map, reversed=reversed)
-
-    @classmethod
-    def fit(cls, src: FloatPairArrayLike, dst: FloatPairArrayLike) -> tuple[Self, float]:
-        raise NotImplementedError("ElasticProjection does not implement the 'fit' method")
-
-    def invert(self) -> Self:
-        return type(self)(self.displacement, reversed=not self.reversed)
-
-    def transform(self, src: FloatPairArrayLike) -> FloatPairArray:
-        from fundus_vessels_toolkit.utils.nnet.profiling import profiler
-
-        with profiler("ElasticTransform.transform"):
-            src = as_float_pairs(src)
-            return self._transform(src, reversed=self.reversed)
-
-    def transform_inverse(self, dst: FloatPairArrayLike) -> FloatPairArray:
-        dst = as_float_pairs(dst)
-        return self._transform(dst, reversed=not self.reversed)
-
-    def _transform[SRC_TYPE: npt.NDArray | torch.Tensor](
-        self, src: SRC_TYPE | None = None, reversed: bool = False
-    ) -> SRC_TYPE:
-        from fundus_vessels_toolkit.utils.nnet.profiling import profiler
-
-        disp_map = self.displacement
-        device = disp_map.device
-        H, W = disp_map.shape[1:]
-
-        src_ = src
-        if src_ is not None:
-            if not isinstance(src_, torch.Tensor):
-                src_ = torch.from_numpy(src_)
-            src_ = src_.to(disp_map.device)
-
-        if reversed:
-            from .utils.torch import inverse_displacement
-
-            with profiler("ElasticTransform._transform inverse") as p:
-                with p.sub("grid_indices"):
-                    if src_ is None:
-                        src_ = grid_indices((H, W), device="cpu")
-                if device != "cpu":
-                    if not hasattr(self, "__disp_map_cpu"):
-                        self.__disp_map_cpu = self.displacement.cpu()
-                    disp_map = self.__disp_map_cpu
-                dst = src_ + inverse_displacement(disp_map.permute(1, 2, 0), src_.cpu(), 50, 0.5).to(device)  # type: ignore
-        else:
-            if src_ is None:
-                src_ = grid_indices((H, W), device=device)
-                dst = src_ + disp_map.permute(1, 2, 0)  # type: ignore
-            elif not torch.is_floating_point(src_):
-                src_[..., 0] = torch.clip(src_[..., 0], 0, H - 1)
-                src_[..., 1] = torch.clip(src_[..., 1], 0, W - 1)
-                dst = src_ + disp_map.permute(1, 2, 0)[src_[..., 0], src_[..., 1]]  # type: ignore
-            else:
-                p = src_
-                dst = src_ + torch_interp_bilinear(disp_map, p[..., 0], p[..., 1])  # type: ignore
-
-        return dst if isinstance(src, torch.Tensor) else dst.numpy(force=True)  # type: ignore
-
-    def _warp[T: npt.NDArray | torch.Tensor](self, src_img: T, src_domain: Rect, dst_domain: Rect) -> tuple[T, Rect]:
-        from fundus_vessels_toolkit.utils.nnet.profiling import profiler
-
-        with profiler("warp") as p:
-            src_img_ = src_img if isinstance(src_img, torch.Tensor) else torch.from_numpy(src_img)
-            src_img_ = src_img_.to(self.displacement.device).permute(2, 0, 1)
-
-            with p.sub("grid_indices"):
-                grid = grid_indices(dst_domain.shape, device=self.displacement.device)
-
-            with p.sub("transform"):
-                grid = self._transform(src=grid, reversed=not self.reversed)
-                grid[..., 0] -= src_domain.top
-                grid[..., 1] -= src_domain.left
-
-            with p.sub("grid_sample"):
-                H, W = src_domain.shape
-                grid[..., 0] = torch.clip(grid[..., 0] * (2 / (H - 1)) - 1, -1, 1)
-                grid[..., 1] = torch.clip(grid[..., 1] * (2 / (W - 1)) - 1, -1, 1)
-                dst = F.grid_sample(src_img_[None, ...], grid[None, ...], align_corners=True).squeeze(0)  # type: ignore
-
-            with p.sub("to numpy"):
-                dst = dst.to(src_img.dtype) if isinstance(src_img, torch.Tensor) else dst.numpy(force=True)
-                return dst, dst_domain  # type: ignore
-
-
-GAUSSIAN_KERNEL_5x5_TORCH: torch.Tensor = (
-    torch.tensor(
-        [[1, 4, 6, 4, 1], [4, 16, 24, 16, 4], [6, 24, 36, 24, 6], [4, 16, 24, 16, 4], [1, 4, 6, 4, 1]],
-        dtype=torch.float32,
-    )
-    / 256.0
-)
-
-
 class ElasticTransform(Transform):
     def __init__(self, displacement: Float32PairMap, reversed: bool = False) -> None:
         displacement = np.asarray(displacement, dtype=np.float32)  # type: ignore
@@ -1939,8 +1799,6 @@ class ElasticTransform(Transform):
     def _transform[SRC_TYPE: npt.NDArray](
         cls, displacement: Float32PairMap, src: SRC_TYPE | None = None, reversed: bool = False
     ) -> SRC_TYPE:
-        from fundus_vessels_toolkit.utils.nnet.profiling import profiler
-
         try:
             import torch
 
@@ -1953,16 +1811,13 @@ class ElasticTransform(Transform):
         disp_t = torch.from_numpy(displacement)
 
         if reversed:
-            with profiler("ElasticTransformLegacy._transform inverse") as p:
-                with p.sub("generate grid"):
-                    src_ = np.indices(displacement.shape[:2]).transpose(1, 2, 0) if src is None else src
-                    src_t = torch.from_numpy(src_.astype(np.float64)).reshape(-1, 2)
+            src_ = np.indices(displacement.shape[:2]).transpose(1, 2, 0) if src is None else src
+            src_t = torch.from_numpy(src_.astype(np.float64)).reshape(-1, 2)
 
-                with p.sub("compute inverse displacement"):
-                    # Inverse displacement field through fixed-point iteration
-                    inv_d = inverse_displacement(disp_t, src_t, 50, 0.5).numpy()
+            # Inverse displacement field through fixed-point iteration
+            inv_d = inverse_displacement(disp_t, src_t, 50, 0.5).numpy()
 
-                return src + inv_d.reshape(src_.shape)
+            return src + inv_d.reshape(src_.shape)
         else:
 
             def interp_displacement(pos: FloatPairMap) -> FloatPairMap:
@@ -1981,23 +1836,144 @@ class ElasticTransform(Transform):
     def _warp[DTYPE: np.uint8 | np.float32](
         self, src_img: npt.NDArray[DTYPE], src_domain: Rect, dst_domain: Rect
     ) -> tuple[npt.NDArray[DTYPE], Rect]:
-        from fundus_vessels_toolkit.utils.nnet.profiling import profiler
-
         cv2 = import_cv2()
 
-        with profiler("ElasticTransformLegacy._warp") as p:
-            with p.sub("grid_indices"):
-                grid = dst_domain.grid_indices()
-            with p.sub("transform"):
-                src_remap = self._transform(self.displacement, src=grid, reversed=not self.reversed)
-            with p.sub("remap"):
-                src_remap = src_remap.astype(np.float32) - src_domain.top_left.numpy().astype(np.float32)
-                return cv2.remap(src_img, src_remap[..., ::-1], None, cv2.INTER_LINEAR), dst_domain  # type: ignore
+        grid = dst_domain.grid_indices(dtype=np.float32)
+        src_remap = self._transform(self.displacement, src=grid, reversed=not self.reversed)
+        if src_domain.top_left != (0, 0):
+            src_remap -= src_domain.top_left.numpy().astype(np.float32)  # type: ignore
+        return cv2.remap(src_img, src_remap[..., ::-1], None, cv2.INTER_LINEAR), dst_domain  # type: ignore
 
 
 GAUSSIAN_KERNEL_5x5: npt.NDArray[np.float32] = (
     np.array(
         [[1, 4, 6, 4, 1], [4, 16, 24, 16, 4], [6, 24, 36, 24, 6], [4, 16, 24, 16, 4], [1, 4, 6, 4, 1]], dtype=np.float32
+    )
+    / 256.0
+)
+
+
+class ElasticTransformTorch(Transform):
+    def __init__(self, displacement: torch.Tensor, reversed: bool = False) -> None:
+        assert displacement.ndim == 3 and displacement.shape[0] == 2, "displacement must be a 2D map of 2D vectors"
+        self.displacement = displacement
+
+        self.reversed = reversed
+        super().__init__()
+
+    def __repr__(self) -> str:
+        return f"ElasticProjection(displacement: {self.displacement.shape})"
+
+    def __str__(self) -> str:
+        return "Elastic"
+
+    def __eq__(self, value: object) -> bool:
+        if not isinstance(value, ElasticTransformTorch):
+            return False
+        return bool(torch.allclose(self.displacement, value.displacement) and self.reversed == value.reversed)
+
+    @classmethod
+    def random(
+        cls,
+        shape: tuple[int, int],
+        displacement_std: float = 10,
+        smoothing_size: Optional[float] = 2,
+        *,
+        rng: Optional[torch.Generator] = None,
+        reversed: bool = True,
+        cuda: bool = False,
+    ) -> Self:
+        device = torch.device("cuda") if cuda else torch.device("cpu")
+        if smoothing_size is not None and smoothing_size <= 0:
+            smoothing_size = None
+        subsampling = smoothing_size // 2 if smoothing_size is not None else 1
+        disp_map_shape = (2, int(shape[0] // subsampling), int(shape[1] // subsampling))
+        disp_map = torch.normal(
+            0, displacement_std, size=disp_map_shape, generator=rng, dtype=torch.float32, device=device
+        )
+        if smoothing_size is not None:
+            global GAUSSIAN_KERNEL_5x5_TORCH
+            if cuda != (GAUSSIAN_KERNEL_5x5_TORCH.device.type == "cuda"):
+                GAUSSIAN_KERNEL_5x5_TORCH = GAUSSIAN_KERNEL_5x5_TORCH.to(device)
+            disp_map = F.conv2d(disp_map[:, None, :, :], GAUSSIAN_KERNEL_5x5_TORCH[None, None, :, :], padding="same")
+            disp_map = F.interpolate(disp_map, size=shape, mode="bicubic").squeeze(1)
+        return cls(disp_map, reversed=reversed)
+
+    @classmethod
+    def fit(cls, src: FloatPairArrayLike, dst: FloatPairArrayLike) -> tuple[Self, float]:
+        raise NotImplementedError("ElasticProjection does not implement the 'fit' method")
+
+    def invert(self) -> Self:
+        return type(self)(self.displacement, reversed=not self.reversed)
+
+    def transform(self, src: FloatPairArrayLike) -> FloatPairArray:
+        src = as_float_pairs(src)
+        return self._transform(src, reversed=self.reversed)
+
+    def transform_inverse(self, dst: FloatPairArrayLike) -> FloatPairArray:
+        dst = as_float_pairs(dst)
+        return self._transform(dst, reversed=not self.reversed)
+
+    def _transform[SRC_TYPE: npt.NDArray | torch.Tensor](
+        self, src: SRC_TYPE | None = None, reversed: bool = False
+    ) -> SRC_TYPE:
+        disp_map = self.displacement
+        device = disp_map.device
+        H, W = disp_map.shape[1:]
+
+        src_ = src
+        if src_ is not None:
+            if not isinstance(src_, torch.Tensor):
+                src_ = torch.from_numpy(src_)
+            src_ = src_.to(disp_map.device)
+
+        if reversed:
+            from .utils.torch import inverse_displacement
+
+            if src_ is None:
+                src_ = grid_indices((H, W), device="cpu")
+            if device != "cpu":
+                if not hasattr(self, "__disp_map_cpu"):
+                    self.__disp_map_cpu = self.displacement.cpu()
+                disp_map = self.__disp_map_cpu
+            dst = src_ + inverse_displacement(disp_map.permute(1, 2, 0), src_.cpu(), 50, 0.5).to(device)  # type: ignore
+        else:
+            if src_ is None:
+                src_ = grid_indices((H, W), device=device)
+                dst = src_ + disp_map.permute(1, 2, 0)  # type: ignore
+            elif not torch.is_floating_point(src_):
+                src_[..., 0] = torch.clip(src_[..., 0], 0, H - 1)
+                src_[..., 1] = torch.clip(src_[..., 1], 0, W - 1)
+                dst = src_ + disp_map.permute(1, 2, 0)[src_[..., 0], src_[..., 1]]  # type: ignore
+            else:
+                p = src_
+                dst = src_ + torch_interp_bilinear(disp_map, p[..., 0], p[..., 1])  # type: ignore
+
+        return dst if isinstance(src, torch.Tensor) else dst.numpy(force=True)  # type: ignore
+
+    def _warp[T: npt.NDArray | torch.Tensor](self, src_img: T, src_domain: Rect, dst_domain: Rect) -> tuple[T, Rect]:
+        src_img_ = src_img if isinstance(src_img, torch.Tensor) else torch.from_numpy(src_img)
+        src_img_ = src_img_.to(self.displacement.device).permute(2, 0, 1)
+
+        grid = grid_indices(dst_domain.shape, device=self.displacement.device)
+
+        grid = self._transform(src=grid, reversed=not self.reversed)
+        grid[..., 0] -= src_domain.top
+        grid[..., 1] -= src_domain.left
+
+        H, W = src_domain.shape
+        grid[..., 0] = torch.clip(grid[..., 0] * (2 / (H - 1)) - 1, -1, 1)
+        grid[..., 1] = torch.clip(grid[..., 1] * (2 / (W - 1)) - 1, -1, 1)
+        dst = F.grid_sample(src_img_[None, ...], grid[None, ...], align_corners=True).squeeze(0)  # type: ignore
+
+        dst = dst.to(src_img.dtype) if isinstance(src_img, torch.Tensor) else dst.numpy(force=True)
+        return dst, dst_domain  # type: ignore
+
+
+GAUSSIAN_KERNEL_5x5_TORCH: torch.Tensor = (
+    torch.tensor(
+        [[1, 4, 6, 4, 1], [4, 16, 24, 16, 4], [6, 24, 36, 24, 6], [4, 16, 24, 16, 4], [1, 4, 6, 4, 1]],
+        dtype=torch.float32,
     )
     / 256.0
 )
