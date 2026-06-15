@@ -312,6 +312,7 @@ class Transform(abc.ABC):
         src_img: npt.NDArray[DTYPE],
         src_top_left: Point | tuple[int, int] = (0, 0),
         warped_domain: Rect | Literal["full", "same"] = "full",
+        channel_last: bool = True,
     ) -> tuple[npt.NDArray[DTYPE], Rect]:
         """
         Warps an image using this projection model.
@@ -319,7 +320,7 @@ class Transform(abc.ABC):
         Parameters
         ----------
         src_img : npt.NDArray[DTYPE]
-            The source image to warp. The image must be cv2 compatible: shape=(H x W [x C]) and dtype=DTYPE.
+            The source image to warp. The image must be cv2 compatible: shape=(H x W [x C]) or shape=(C x H x W) if ``channel_last`` is False.
 
         src_top_left : Point | tuple[int, int]
             The top-left corner of the source image domain. The ``src_domain`` is defined as a Rect with this top-left corner and the size of the source image.
@@ -330,15 +331,21 @@ class Transform(abc.ABC):
             - "same": the destination domain is the same as ``src_domain``;
             - or any Rect manually defining the requested destination domain.
 
+        channel_last : bool, optional
+            Whether the source image has the channel dimension as the last axis. By default True.
+
         Returns
         -------
         dst_img : npt.NDArray[np.uint8] | npt.NDArray[np.float32]
-            The warped image.
+            The warped image with the same dtype as the source image and shape=(H x W [x C]) where H and W are the height and width of the warped domain and C is the number of channels if ``channel_last`` is True, or shape=(C x H x W) if ``channel_last`` is False.
 
         warped_domain : Rect
             The domain of the warped image.
         """  # noqa: E501
         src_origin = -Point.parse(src_top_left)
+        if not channel_last and src_img.ndim == 3:
+            src_img = np.transpose(src_img, (1, 2, 0))
+
         warped_domain, src_region, src_region_domain = self.select_warped_region(src_img, src_origin, warped_domain)
         is_bool = src_region.dtype == bool
         if is_bool:
@@ -346,6 +353,8 @@ class Transform(abc.ABC):
         dst_map, warped_domain = self._warp(src_region, src_region_domain, warped_domain)  # type: ignore
         if is_bool:
             dst_map = dst_map > 125
+        if not channel_last and dst_map.ndim == 3:
+            dst_map = np.transpose(dst_map, (2, 0, 1))
         return dst_map, warped_domain  # type: ignore
 
     def _warp[DTYPE: np.uint8 | np.float32](

@@ -326,7 +326,7 @@ class FundusData:
         def roi_crop(img):
             if roi is None:
                 return img
-            return Rect.from_size(self.shape).crop_pad_image(img)
+            return Rect.from_size(self.shape).crop_pad_image(img, copy=False)
 
         if image is not ...:
             other._image = roi_crop(other.load_fundus_image(image, **shape_opts))
@@ -530,7 +530,7 @@ class FundusData:
 
         # --- Extract ROI ---
         if crop_pad is not None:
-            fundus_ = crop_pad.crop_pad_image(fundus_)
+            fundus_ = crop_pad.crop_pad_image(fundus_, copy=False)
 
         # -- Resize the image ---
         if target_shape is not None and target_shape != fundus_.shape[-2:]:
@@ -597,7 +597,7 @@ class FundusData:
                 raise ValueError("Invalid fundus mask")
 
             if crop_pad is not None:
-                fundus_mask_ = crop_pad.crop_pad_image(fundus_mask_)
+                fundus_mask_ = crop_pad.crop_pad_image(fundus_mask_, copy=False)
 
             if fundus_mask_.dtype != bool:
                 fundus_mask_ = fundus_mask_ > 127 if fundus_mask_.dtype == np.uint8 else fundus_mask_ > 0.5
@@ -667,6 +667,10 @@ class FundusData:
 
         if vessels_.dtype != bool:
             vessels_ = vessels_ > 127 if vessels_.dtype == np.uint8 else vessels_ > 0.5
+
+        # --- Crop/PAD ---
+        if crop_pad is not None:
+            vessels_ = crop_pad.crop_pad_image(vessels_, copy=False)
 
         # -- Resize the image ---
         if target_shape is not None and target_shape != vessels_.shape[-2:]:
@@ -781,7 +785,7 @@ class FundusData:
 
         # --- Crop/PAD ---
         if crop_pad is not None:
-            av_ = crop_pad.crop_pad_image(av_)
+            av_ = crop_pad.crop_pad_image(av_, copy=False)
 
         # --- Resize the image ---
         if target_shape is not None and av_.shape != target_shape:
@@ -882,6 +886,10 @@ class FundusData:
         if seg_.dtype != bool:
             MAX = 255 if seg_.dtype == np.uint8 else 1
             seg_ = seg_ > MAX / 2
+
+        # --- Crop/PAD ---
+        if crop_pad is not None:
+            seg_ = crop_pad.crop_pad_image(seg_, copy=False)
 
         # --- Resize the image ---
         if target_shape is not None and seg_.shape != target_shape:
@@ -1328,23 +1336,24 @@ class FundusData:
         transform: Transform,
         src_top_left: Point | tuple[int, int] = (0, 0),
         dst_domain: Rect | Literal["full", "same"] = "full",
-    ) -> Self:
+    ) -> tuple[Self, Rect]:
         """Apply a geometric transformation to the fundus image and the vessels segmentation."""
         other = copy(self)
         dst_domain = transform.warped_domain(self.shape, src_top_left, dst_domain)
+        other._shape = dst_domain.shape
 
         if self._image is not None:
-            other._image = transform.warp(self._image, src_top_left, dst_domain)
+            other._image, _ = transform.warp(self._image, src_top_left, dst_domain, channel_last=False)
         if self._roi_mask is not None:
-            other._roi_mask = transform.warp(self._roi_mask, src_top_left, dst_domain)
+            other._roi_mask, _ = transform.warp(self._roi_mask, src_top_left, dst_domain)
         if self._vessels is not None:
-            other._vessels = transform.warp(self._vessels, src_top_left, dst_domain)
+            other._vessels, _ = transform.warp(self._vessels, src_top_left, dst_domain)
         if self._av is not None:
-            other._av = transform.warp(self._av, src_top_left, dst_domain)
+            other._av, _ = transform.warp(self._av, src_top_left, dst_domain)
         if self._od is not None:
-            other._od = transform.warp(self._od, src_top_left, dst_domain)
+            other._od, _ = transform.warp(self._od, src_top_left, dst_domain)
         if self._macula is not None:
-            other._macula = transform.warp(self._macula, src_top_left, dst_domain)
+            other._macula, _ = transform.warp(self._macula, src_top_left, dst_domain)
         if self._od_center not in (None, ABSENT):
             other._od_center = transform.transform(self._od_center + src_top_left) - dst_domain.top_left
         if self._od_size not in (None, ABSENT):
@@ -1368,7 +1377,7 @@ class FundusData:
         if self._macula_center not in (None, ABSENT):
             other._macula_center = transform.transform(self._macula_center + src_top_left) - dst_domain.top_left
 
-        return other
+        return other, dst_domain
 
     def rotate(self, angle: float) -> Self:
         """Rotate the fundus image and the vessels segmentation by a given angle.
@@ -1382,7 +1391,7 @@ class FundusData:
                 The rotated fundus image and vessels segmentation.
         """
         h, w = self.shape
-        return self.transform(AffineTransform.rotate(theta=angle, center=(h / 2, w / 2)), dst_domain="same")
+        return self.transform(AffineTransform.rotate(theta=angle, center=(h / 2, w / 2)), dst_domain="same")[0]
 
     def resize(self, size: float | int | Tuple[int, int]) -> Self:
         """Rescale the fundus image and the vessels segmentation to a given size.
@@ -1411,7 +1420,7 @@ class FundusData:
 
         s = Point(shape[0] / self.shape[0], shape[1] / self.shape[1])
 
-        return self.transform(ResizeTranslation.resize(s=s), dst_domain=Rect.from_size(shape))
+        return self.transform(ResizeTranslation.resize(s=s), dst_domain=Rect.from_size(shape))[0]
 
     def crop(self, roi: Rect) -> Self:
         """Crop the fundus image and the vessels segmentation to a given rectangle.
@@ -1428,7 +1437,7 @@ class FundusData:
         """
 
         def crop_roi(array: npt.NDArray) -> npt.NDArray:
-            return roi.crop_pad_image(array)
+            return roi.crop_pad_image(array, copy=False)
 
         updated_data = {}
         if self._image is not None:
@@ -1466,7 +1475,7 @@ class FundusData:
         """
 
         def uncrop_roi(array: npt.NDArray) -> npt.NDArray:
-            return Rect.from_size(dst_shape).crop_pad_image(array, origin=-roi.top_right)
+            return Rect.from_size(dst_shape).crop_pad_image(array, origin=-roi.top_right, copy=False)
 
         updated_data = {}
         if self._image is not None:

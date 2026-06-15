@@ -152,6 +152,9 @@ def as_float_pairs(pairs: FloatPairArrayLike, copy: bool | None = None) -> Float
     return arr  # type: ignore
 
 
+as_points = as_float_pairs
+
+
 def as_float_pairs_map(pairs: Float3DArrayLike) -> FloatPairMap:
     arr = np.asarray(pairs, dtype=np.float64)
     assert arr.ndim == 3 and arr.shape[2] == 2, (
