@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import typing
 from copy import copy
+from dataclasses import dataclass
 from enum import Enum, IntEnum
 from pathlib import Path
 from types import EllipsisType
@@ -10,7 +11,7 @@ from typing import TYPE_CHECKING, Literal, Optional, Self, Tuple, TypeAlias, Typ
 import numpy as np
 import numpy.typing as npt
 
-from .transform import AffineTransform, ResizeTranslation, SimilarityTransform, Transform
+from .transform import AffineTransform, Bool2DArray, ResizeTranslation, Transform
 from .utils.data_io import most_common_image_ext
 from .utils.geometric import Point, Rect
 from .utils.image import (
@@ -22,7 +23,9 @@ from .utils.image import (
     write_image,
     read_image_shape,
 )
+from .utils.math import fit_circle
 from .utils.safe_import import is_torch_tensor
+from .utils.typing import Bool1DArray, PointArrayLike, as_points
 
 if TYPE_CHECKING:
     import torch
@@ -118,6 +121,7 @@ class FundusData:
         image=None,
         *,
         roi_mask=None,
+        roi_specs: Optional[FundusROISpecs] = None,
         vessels=None,
         av=None,
         od=None,
@@ -125,6 +129,7 @@ class FundusData:
         od_size=None,
         macula=None,
         macula_center=None,
+        scale: Optional[float] = None,
         name: Optional[str] = None,
         check_validity: bool = True,
         shape: Optional[Tuple[int, int] | ImageSource] = None,
@@ -145,67 +150,72 @@ class FundusData:
         self._name = name
 
         if isinstance(shape, (Path, str)):
-            shape = read_image_shape(shape)
+            shape_ = read_image_shape(shape)
         elif isinstance(shape, np.ndarray) or is_torch_tensor(shape):
-            shape = tuple(shape.shape[-2:])  # type: ignore[assignment]
-        assert shape is None or (isinstance(shape, tuple) and len(shape) == 2), "Shape must be a tuple of (H, W)."
+            shape_ = tuple(shape.shape[-2:])  # type: ignore[assignment]
+        else:
+            shape_: Optional[Tuple[int, int]] = shape  # type: ignore
+        assert shape_ is None or (isinstance(shape_, tuple) and len(shape_) == 2), "Shape must be a tuple of (H, W)."
 
         if image is not None:
             if check_validity:
-                image = self.load_fundus_image(image, shape, reshape_method=reshape_method)
+                image = self.load_fundus_image(image, shape_, reshape_method=reshape_method)
             else:
                 assert isinstance(image, np.ndarray), "The image must be a numpy array."
             self._image = image
-            if shape is None:
-                shape = self._image.shape[-2:]  # type: ignore[assignment]
+            if shape_ is None:
+                shape_ = self._image.shape[-2:]  # type: ignore[assignment]
         else:
             self._image = None
+
+        assert roi_specs is None or isinstance(roi_specs, FundusROISpecs), (
+            "The roi_specs must be an instance of ROISpecs."
+        )
+        self._roi_specs = roi_specs
 
         if roi_mask is not None:
             if check_validity:
                 roi_mask = self.load_fundus_mask(
-                    roi_mask, from_fundus=False, target_shape=shape, reshape_method=reshape_method
+                    roi_mask, from_fundus=False, target_shape=shape_, reshape_method=reshape_method
                 )
             else:
                 assert isinstance(roi_mask, np.ndarray), "The fundus mask must be a numpy array."
             self._roi_mask = roi_mask
-            if shape is None:
-                shape = roi_mask.shape[-2:]  # type: ignore[assignment]
-        elif self._image is not None:
-            self._roi_mask = self.load_fundus_mask(self._image, from_fundus=True)
+            if shape_ is None:
+                shape_ = roi_mask.shape[-2:]  # type: ignore[assignment]
         else:
             self._roi_mask = None
 
         if vessels is not None:
             if check_validity:
-                vessels = self.load_vessels(vessels, target_shape=shape, reshape_method=reshape_method)
+                vessels = self.load_vessels(vessels, target_shape=shape_, reshape_method=reshape_method)
             else:
                 assert isinstance(vessels, np.ndarray), "The vessels segmentation must be a numpy array."
             self._vessels = vessels
-            if shape is None:
-                shape = vessels.shape[-2:]  # type: ignore[assignment]
+            if shape_ is None:
+                shape_ = vessels.shape[-2:]  # type: ignore[assignment]
         else:
             self._vessels = None
         self._bin_vessels = None
 
         if av is not None:
             if check_validity:
-                av = self.load_av(av, target_shape=shape, reshape_method=reshape_method)
+                av = self.load_av(av, target_shape=shape_, reshape_method=reshape_method)
             else:
                 assert isinstance(av, np.ndarray), "The artery/vein segmentation must be a numpy array."
             self._av = av
-            if shape is None:
-                shape = av.shape[-2:]  # type: ignore[assignment]
+            if shape_ is None:
+                shape_ = av.shape[-2:]  # type: ignore[assignment]
         else:
             self._av = None
 
         if od is not None:
             if check_validity:
                 self._od, self._od_center, self._od_size = self.load_od_macula(
-                    od, shape, reshape_method=reshape_method, fit_ellipse=True
+                    od, shape_, reshape_method=reshape_method, fit_ellipse=True
                 )  # type: ignore
-                if shape is None:
-                    shape = self._od.shape[-2:]  # type: ignore[assignment]
+                if shape_ is None:
+                    shape_ = self._od.shape[-2:]  # type: ignore[assignment]
             else:
                 assert isinstance(od, np.ndarray), "The optic disc segmentation must be a numpy array."
                 self._od, self._od_center, self._od_size = od, od_center, od_size
@@ -216,9 +226,9 @@ class FundusData:
 
         if macula is not None:
             if check_validity:
-                self._macula, self._macula_center = self.load_od_macula(macula, shape, reshape_method=reshape_method)
-                if shape is None:
-                    shape = self._macula.shape[-2:]  # type: ignore[assignment]
+                self._macula, self._macula_center = self.load_od_macula(macula, shape_, reshape_method=reshape_method)
+                if shape_ is None:
+                    shape_ = self._macula.shape[-2:]  # type: ignore[assignment]
             else:
                 assert isinstance(macula, np.ndarray), "The macula segmentation must be a numpy array."
                 self._macula, self._macula_center = macula, macula_center
@@ -226,9 +236,10 @@ class FundusData:
             self._macula = None
             self._macula_center = None if macula_center is None else Point.parse(macula_center)
 
-        if shape is None:
+        if shape_ is None:
             raise ValueError("No data was provided to initialize the FundusData.")
-        self._shape = shape
+        self._shape = shape_
+        self._scale = scale
 
         self._immutable = immutable
 
@@ -332,6 +343,8 @@ class FundusData:
             other._image = roi_crop(other.load_fundus_image(image, **shape_opts))
         if roi_mask is not ...:
             other._roi_mask = roi_crop(other.load_fundus_mask(roi_mask, **shape_opts))
+            if other._roi_specs is not None:
+                other._roi_specs = None  # Invalidate the roi_specs
         if vessels is not ...:
             other._vessels = roi_crop(other.load_vessels(vessels, **shape_opts))
         if av is not ...:
@@ -454,17 +467,46 @@ class FundusData:
         for name in common_names:
             yield cls(**{modality: paths[modality][name] for modality in paths.keys()} | {"name": name})
 
-    def remove_od_from_vessels(self):
+    def remove_od_from_vessels(self, shrink_factor: float = 0, *, mask_roi: bool = True, inplace=False) -> Self:
         updated_data = {}
+        mask = self.od
+
+        if shrink_factor > 0:
+            from .utils.safe_import import cv2
+
+            mask = cv2.distanceTransform(mask.astype(np.uint8), cv2.DIST_L2, 5) > shrink_factor * self.od_diameter
+        if mask_roi:
+            mask |= ~self.roi_mask
+
         if self._vessels is not None:
             vessels = self._vessels.copy()
-            vessels[self.od] = False
+            vessels[mask] = False
             updated_data["vessels"] = vessels
         if self._av is not None:
             av = self._av.copy()
-            av[self.od] = AVLabel.UNK
+            av[mask] = AVLabel.BKG
             updated_data["av"] = av
-        return self.update(**updated_data)
+        return self.update(**updated_data, inplace=inplace)
+
+    def apply_roi_mask(self, inplace=False) -> Self:
+        mask = ~self.roi_mask
+        mutable = not self._immutable
+
+        data = self if inplace else self.copy(mutable=True)
+        if data._image is not None:
+            data._image[:, mask] = 0
+        if data._vessels is not None:
+            data._vessels[mask] = False
+        if data._av is not None:
+            data._av[mask] = AVLabel.BKG
+        if data._od is not None:
+            data._od[mask] = False
+        if data._macula is not None:
+            data._macula[mask] = False
+
+        if mutable:
+            data._set_immutable_flag(False)
+        return data
 
     ####################################################################################################################
     #    === CHECK METHODS ===
@@ -536,7 +578,8 @@ class FundusData:
         if target_shape is not None and target_shape != fundus_.shape[-2:]:
             match ReshapeMethod.parse(reshape_method):
                 case ReshapeMethod.RESIZE:
-                    fundus_ = resize(fundus_, target_shape, interpolation=True)
+                    t = ResizeTranslation((target_shape[0] / fundus_.shape[-2], target_shape[1] / fundus_.shape[-1]))
+                    fundus_ = t.warp(fundus_, channel_last=False, warped_domain=Rect.from_size(target_shape))
                 case ReshapeMethod.CROP:
                     fundus_ = crop_pad_center(fundus_, target_shape)
                 case ReshapeMethod.RAISE:
@@ -580,40 +623,42 @@ class FundusData:
             from .utils.fundus import fundus_ROI
 
             fundus = cls.load_fundus_image(fundus_mask, target_shape, reshape_method=reshape_method, crop_pad=crop_pad)
-            fundus_mask_ = fundus_ROI(fundus, check=True if name is None else name)  # Compute the fundus mask
+            mask_ = fundus_ROI(fundus, check=True if name is None else name)  # Compute the fundus mask
         else:
             # --- Load the image ---
             if isinstance(fundus_mask, (str, Path)):
-                fundus_mask_ = read_image(fundus_mask, cast_to_float=False)
+                mask_ = read_image(fundus_mask, cast_to_float=False)
             elif is_torch_tensor(fundus_mask):
-                fundus_mask_ = fundus_mask.numpy(force=True)
+                mask_ = fundus_mask.numpy(force=True)
             elif isinstance(fundus_mask, np.ndarray):
-                fundus_mask_ = fundus_mask
+                mask_ = fundus_mask
             else:
                 raise TypeError("The fundus mask must be a path, a numpy array or a torch tensor.")
 
             # --- Check image ---
-            if fundus_mask_.ndim != 2:
+            if mask_.ndim != 2:
                 raise ValueError("Invalid fundus mask")
 
             if crop_pad is not None:
-                fundus_mask_ = crop_pad.crop_pad_image(fundus_mask_, copy=False)
+                mask_ = crop_pad.crop_pad_image(mask_, copy=False)
 
-            if fundus_mask_.dtype != bool:
-                fundus_mask_ = fundus_mask_ > 127 if fundus_mask_.dtype == np.uint8 else fundus_mask_ > 0.5
+            if mask_.dtype != bool:
+                mask_ = mask_ > 127 if mask_.dtype == np.uint8 else mask_ > 0.5
 
         # -- Resize the image ---
-        if target_shape is not None and target_shape != fundus_mask_.shape[-2:]:
+        if target_shape is not None and target_shape != mask_.shape[-2:]:
             match ReshapeMethod.parse(reshape_method):
                 case ReshapeMethod.RESIZE:
-                    fundus_mask_ = resize(fundus_mask_, target_shape, interpolation=False)
+                    shape = mask_.shape[-2:]
+                    t = ResizeTranslation((target_shape[0] / shape[-2], target_shape[1] / shape[-1]))
+                    mask_ = t.warp(mask_, channel_last=False, warped_domain=Rect.from_size(target_shape))
                 case ReshapeMethod.CROP:
-                    fundus_mask_ = crop_pad_center(fundus_mask_, target_shape)
+                    mask_ = crop_pad_center(mask_, target_shape)
                 case ReshapeMethod.RAISE:
                     raise ValueError(
-                        f"The fundus image shape {fundus_mask_.shape} differs from the target shape {target_shape}."
+                        f"The fundus image shape {mask_.shape} differs from the target shape {target_shape}."
                     )
-        return fundus_mask_  # type: ignore
+        return mask_  # type: ignore
 
     @classmethod
     def load_vessels(
@@ -676,7 +721,8 @@ class FundusData:
         if target_shape is not None and target_shape != vessels_.shape[-2:]:
             match ReshapeMethod.parse(reshape_method):
                 case ReshapeMethod.RESIZE:
-                    vessels_ = resize(vessels_, target_shape, interpolation=True)
+                    t = ResizeTranslation(s=(target_shape[0] / vessels_.shape[0], target_shape[1] / vessels_.shape[1]))
+                    vessels_ = cls.warp_vessels(vessels_, t, dst_domain=Rect.from_size(target_shape))
                 case ReshapeMethod.CROP:
                     vessels_ = crop_pad_center(vessels_, target_shape)
                 case ReshapeMethod.RAISE:
@@ -791,10 +837,8 @@ class FundusData:
         if target_shape is not None and av_.shape != target_shape:
             match ReshapeMethod.parse(reshape_method):
                 case ReshapeMethod.RESIZE:
-                    vessel_mask = av_ > 0
-                    vessel_mask = resize(vessel_mask, target_shape, interpolation=True)
-                    av_ = resize(av_, target_shape, interpolation=False) * vessel_mask
-                    # TODO: Smooth av_ boundaries (right now, only vessel_mask is smoothed)
+                    t = ResizeTranslation(s=(target_shape[0] / av_.shape[0], target_shape[1] / av_.shape[1]))
+                    av_ = cls.warp_vessels(av_, t, dst_domain=Rect.from_size(target_shape))
                 case ReshapeMethod.CROP:
                     av_ = crop_pad_center(av_, target_shape)
                 case ReshapeMethod.RAISE:
@@ -906,6 +950,40 @@ class FundusData:
         # --- Find the centroid ---
         return find_centroid(seg_.astype(np.bool_), fit_ellipse=fit_ellipse)
 
+    def infer_scale(self, method: Literal["od_macula", "od_diameter", "width"] | None = None) -> float:
+        """Infer the scale of the fundus image in μm per pixel using optic disc, macula or vessels segmentation.
+
+        - "od_macula": use the distance between the optic disc and macula centers, assuming an average distance of 4500 μm.
+        - "od_diameter": use the diameter of the optic disc, assuming an average diameter of 1.8 mm.
+        - "width": use the width of the fundus image, assuming an average width of 15 mm (45°).
+
+        Returns
+        -------
+        float
+            The inferred scale in microns per pixel.
+        """
+        if method is None:
+            if self.has_od and self.has_macula and self.od_center is not None and self.macula_center is not None:
+                method = "od_macula"
+            elif self.has_od and self.od_diameter is not None:
+                method = "od_diameter"
+            else:
+                method = "width"
+
+        match method:
+            case "od_macula":
+                if not (self.has_od and self.has_macula) or self.od_center is None or self.macula_center is None:
+                    raise ValueError("Cannot infer scale from optic disc and macula centers.")
+                return 4500 / self.od_center.distance(self.macula_center)
+            case "od_diameter":
+                if not self.has_od or self.od_diameter is None:
+                    raise ValueError("Cannot infer scale from optic disc diameter.")
+                return 1800 / self.od_diameter
+            case "width":
+                return 15000 / (self.roi_specs.radius * 2)  # Assuming a fundus width of 14 mm (45°)
+            case _:
+                raise ValueError(f"Unknown scale inference method: {method}")
+
     ####################################################################################################################
     #    === PROPERTY ACCESSORS ===
     ####################################################################################################################
@@ -935,8 +1013,23 @@ class FundusData:
     @property
     def roi_mask(self) -> npt.NDArray[np.bool_]:
         if self._roi_mask is None:
-            raise AttributeError("The fundus ROI mask was not provided.")
+            if self._roi_specs is not None:
+                self._roi_mask = self._roi_specs.to_mask(self.shape)
+            elif self._image is not None:
+                self._roi_mask = self.load_fundus_mask(self._image, from_fundus=True, target_shape=self.shape)
+            else:
+                raise AttributeError("The fundus ROI mask was not provided.")
+            if self.immutable:
+                self._roi_mask.setflags(write=False)
         return self._roi_mask
+
+    @property
+    def roi_specs(self) -> FundusROISpecs:
+        if self._roi_specs is None:
+            if self._roi_mask is None and self._image is None:
+                raise AttributeError("The fundus ROI mask was not provided.")
+            self._roi_specs = FundusROISpecs.from_mask(self.roi_mask)
+        return self._roi_specs
 
     @property
     def has_vessels(self) -> bool:
@@ -1208,6 +1301,14 @@ class FundusData:
         return Point(self._od_center.y, x=self._od_center.x + half_weight)
 
     @property
+    def scale(self) -> float:
+        """The scale of the fundus image in μm per pixel.
+        If not provided, estimates its value using ``FundusData.infer_scale()``."""
+        if self._scale is None:
+            self._scale = self.infer_scale()
+        return self._scale
+
+    @property
     def name(self) -> str:
         """The name of the fundus image.
 
@@ -1289,7 +1390,7 @@ class FundusData:
         AVLabel.UNK: np.array([0, 255, 0], np.uint8),  # Green
     }
 
-    def draw(self, labels_opacity=0.5, *, view=None):
+    def draw(self, labels_opacity=0.5, *, vessels_on_top=False, view=None):
         from jppype import Mosaic, View2D
 
         if isinstance(view, Mosaic):
@@ -1317,10 +1418,12 @@ class FundusData:
             labels = np.zeros(self.shape, dtype=np.uint8)
 
         if self._od is not None:
-            labels[self._od] = 10
+            od = self._od & ~self.vessels if vessels_on_top else self._od
+            labels[od] = 10
 
         if self._macula is not None:
-            labels[self._macula] = 11
+            macula = self._macula & ~self.vessels if vessels_on_top else self._macula
+            labels[macula] = 11
 
         view.add_label(labels, "AnatomicalData", opacity=labels_opacity, colormap=COLORS)
         return view
@@ -1346,38 +1449,67 @@ class FundusData:
             other._image, _ = transform.warp(self._image, src_top_left, dst_domain, channel_last=False)
         if self._roi_mask is not None:
             other._roi_mask, _ = transform.warp(self._roi_mask, src_top_left, dst_domain)
+        if self._roi_specs is not None:
+            other._roi_specs = self._roi_specs.transform(transform, src_top_left, dst_domain)
         if self._vessels is not None:
             other._vessels, _ = transform.warp(self._vessels, src_top_left, dst_domain)
         if self._av is not None:
-            other._av, _ = transform.warp(self._av, src_top_left, dst_domain)
+            other._av = self.warp_vessels(self._av, transform, src_top_left, dst_domain)
+
         if self._od is not None:
             other._od, _ = transform.warp(self._od, src_top_left, dst_domain)
         if self._macula is not None:
             other._macula, _ = transform.warp(self._macula, src_top_left, dst_domain)
         if self._od_center not in (None, ABSENT):
             other._od_center = transform.transform(self._od_center + src_top_left) - dst_domain.top_left
-        if self._od_size not in (None, ABSENT):
-            # Sample 20 points on the OD ellipse and transform them to get the new size of the OD
-            assert self._od_center is not None and self._od_size is not None
-
-            if transform.is_yx_independent:
-                od_rect = Rect.from_center(self._od_center, self._od_size)
-                od_rect = transform.transform_domain(od_rect)
-                other._od_size = od_rect.size
-            else:
-                theta = np.linspace(0, 2 * np.pi, 30, endpoint=False)
-                od_y = self._od_center.y + self._od_size.y * np.sin(theta)
-                od_x = self._od_center.x + self._od_size.x * np.cos(theta)
-                od_yx = np.stack((od_y, od_x), axis=-1)
-                od_yx = transform.transform(od_yx + src_top_left) - dst_domain.top_left
-                od_h = od_yx[:, 0].max() - od_yx[:, 0].min()
-                od_w = od_yx[:, 1].max() - od_yx[:, 1].min()
-                other._od_size = Point(od_h, od_w)
-
         if self._macula_center not in (None, ABSENT):
             other._macula_center = transform.transform(self._macula_center + src_top_left) - dst_domain.top_left
 
+        if not transform.is_identity():
+            if isinstance(transform, AffineTransform):
+                s = transform.scaling
+                if self._od_size not in (None, ABSENT):
+                    other._od_size = other._od_size * s
+                if other._scale is not None:
+                    other._scale = other._scale * s
+            else:
+                other._od_size = None
+                other._scale = None
+
         return other, dst_domain
+
+    @classmethod
+    def warp_vessels[DTYPE: np.uint8 | np.bool_](
+        cls,
+        av: npt.NDArray[DTYPE],
+        transform: Transform,
+        src_top_left: Point | tuple[int, int] = (0, 0),
+        dst_domain: Rect | Literal["full", "same"] = "full",
+    ) -> npt.NDArray[DTYPE]:
+        if av.dtype != np.bool_:
+            art = np.isin(av, [AVLabel.ART, AVLabel.BOTH]).astype(np.float32)
+            art, _ = transform.warp(art, src_top_left, dst_domain)
+            vei = np.isin(av, [AVLabel.VEI, AVLabel.BOTH]).astype(np.float32)
+            vei, _ = transform.warp(vei, src_top_left, dst_domain)
+
+            av_ = np.zeros_like(art, dtype=np.uint8)
+            threshold = 0.5
+            if isinstance(transform, AffineTransform) and abs(transform.scaling) < 1:
+                threshold *= transform.scaling  # Ensure vessels 1px wide remain visible after down-scaling
+            av_[art > threshold] = np.uint8(AVLabel.ART)
+            av_[vei > threshold] += np.uint8(AVLabel.VEI)
+
+            unk = np.isin(av, [AVLabel.UNK]).astype(np.float32)
+            if unk.any():
+                unk, _ = transform.warp(unk, src_top_left, dst_domain)
+                av_[unk > threshold] = np.uint8(AVLabel.UNK)
+            return av_  # type: ignore
+        else:
+            av_, _ = transform.warp(av.astype(np.float32), src_top_left, dst_domain)
+            threshold = 0.5
+            if isinstance(transform, AffineTransform) and abs(transform.scaling) < 1:
+                threshold *= transform.scaling  # Ensure vessels 1px wide remain visible after down-scaling
+            return av_ > threshold  # type: ignore
 
     def rotate(self, angle: float) -> Self:
         """Rotate the fundus image and the vessels segmentation by a given angle.
@@ -1444,6 +1576,8 @@ class FundusData:
             updated_data["image"] = crop_roi(self._image)
         if self._roi_mask is not None:
             updated_data["roi_mask"] = crop_roi(self._roi_mask)
+        if self._roi_specs is not None:
+            updated_data["roi_specs"] = self._roi_specs.transform(dst_domain=roi)
         if self._vessels is not None:
             updated_data["vessels"] = crop_roi(self._vessels)
         if self._av is not None:
@@ -1482,6 +1616,8 @@ class FundusData:
             updated_data["image"] = uncrop_roi(self._image)
         if self._roi_mask is not None:
             updated_data["roi_mask"] = uncrop_roi(self._roi_mask)
+        if self._roi_specs is not None:
+            updated_data["roi_specs"] = self._roi_specs.transform(src_top_left=roi.top_left)
         if self._vessels is not None:
             updated_data["vessels"] = uncrop_roi(self._vessels)
         if self._av is not None:
@@ -1515,18 +1651,167 @@ class FundusData:
         FundusData
             The cropped FundusData.
         """
-        if self.roi_mask is None:
-            raise ValueError("Cannot crop to ROI: no ROI mask available.")
-        ys, xs = np.where(self.roi_mask)
-        y_min, y_max = ys.min(), ys.max()
-        x_min, x_max = xs.min(), xs.max()
+        try:
+            roi_specs = self.roi_specs
+        except AttributeError:
+            raise ValueError("Cannot crop to ROI: no ROI mask available.") from None
 
-        r = Rect.from_points(y_min, x_min, y_max + 1, x_max + 1)
-        if pad:
-            r = r.pad(int(pad * r.w))
-        if ensure_square:
-            side = max(r.h, r.w)
-            r = r.from_center(r.center, (side, side))
-
+        r = roi_specs.to_rect(ensure_square=ensure_square, pad=pad)
         fundus = self.crop(r)
         return (fundus, r) if return_roi else fundus
+
+    type ROISpecs = FundusROISpecs
+
+
+@dataclass
+class FundusROISpecs:
+    """Specifications of a region of interest (ROI) in a fundus image."""
+
+    center: Point
+    """The center of the ROI in pixels."""
+
+    radius: float
+    """The radius of the ROI in pixels."""
+
+    top: int | None
+    """The first not-null row."""
+
+    bottom: int | None
+    """The last not-null row."""
+
+    @classmethod
+    def from_mask(cls, roi_mask: npt.NDArray[np.bool_]) -> Self:
+        """Create ROISpecs from a binary ROI mask."""
+
+        h, w = roi_mask.shape
+        half_h, half_w = h / 2, w / 2
+        # 1. Approximate y_min and y_max by looking at the center vertical axis
+        center_col = roi_mask[:, roi_mask.shape[1] // 2]
+        y_min = np.argmax(center_col)
+        y_max = h - 1 - np.argmax(np.flip(center_col))
+
+        # 2. Sample rows to estimate the center and radius of the ROI
+        y = np.linspace(y_min, y_max, min(100, y_max - y_min), dtype=int)
+        rows = roi_mask[y]
+        x_mins = np.argmax(rows, axis=1)
+        invalid_rows = ((x_mins == 0) & (~roi_mask[y, 0])) | (x_mins > half_w)
+        if np.any(invalid_rows):
+            y, rows, x_mins = y[~invalid_rows], rows[~invalid_rows], x_mins[~invalid_rows]
+        x_maxs = w - 1 - np.argmax(np.flip(rows, axis=1), axis=1)
+        invalid_rows = x_maxs < half_w
+        if np.any(invalid_rows):
+            y, x_mins, x_maxs = y[~invalid_rows], x_mins[~invalid_rows], x_maxs[~invalid_rows]
+
+        yx = np.stack((np.tile(y, (2,)), np.concatenate([x_mins, x_maxs])), axis=-1)
+        center, radius = fit_circle(yx)
+
+        # 3. If y_max and y_min doesn't match the estimated radius and center check for crop band on the top and bottom
+        if abs(y_min - center.y + radius) > radius * 0.1 or abs(y_max - center.y - radius) > radius * 0.1:
+            x = np.linspace(half_h * 0.8, half_h * 1.2, min(20, int(half_h * 0.4)), dtype=int)
+            cols = roi_mask[:, x]
+            y_mins = np.argmax(cols, axis=0)
+            invalid_cols = ((y_mins == 0) & (~roi_mask[0, x])) | (y_mins > half_h)
+            if np.any(invalid_cols):
+                x, cols, y_mins = x[~invalid_cols], cols[:, ~invalid_cols], y_mins[~invalid_cols]
+            y_maxs = h - np.argmax(np.flip(cols, axis=0), axis=0)
+            invalid_cols = y_maxs < half_h
+            if np.any(invalid_cols):
+                x, y_mins, y_maxs = x[~invalid_cols], y_mins[~invalid_cols], y_maxs[~invalid_cols]
+            top = int(np.floor(np.percentile(y_mins, 95)))
+            bottom = int(np.ceil(np.percentile(y_maxs, 5)))
+        else:
+            top = None
+            bottom = None
+
+        return cls(center, radius, top, bottom)
+
+    def to_mask(self, shape: Tuple[int, int]) -> Bool2DArray:
+        """Convert the ROISpecs to a binary mask of the given shape."""
+        from skimage.morphology import disk
+
+        x0 = int(np.floor(self.center.x - self.radius))
+        y0 = int(np.floor(self.center.y - self.radius))
+        disk_mask: Bool2DArray = disk(self.radius, dtype=np.bool_)  # type: ignore
+        mask = Rect.from_size(shape).crop_pad_image(disk_mask, origin=(-y0, -x0), copy=False)
+
+        if self.top is not None:
+            mask[: self.top] = False
+        if self.bottom is not None:
+            mask[self.bottom :] = False
+        return mask  # type: ignore
+
+    def to_rect(self, ensure_square: bool = False, pad: float = 0) -> Rect:
+        """Convert the ROISpecs to a Rect."""
+        r = Rect.from_center(self.center, (self.radius * 2, self.radius * 2))
+
+        if not ensure_square:
+            top = self.top if self.top is not None else r.top
+            bottom = self.bottom if self.bottom is not None else r.bottom
+            r = Rect.from_points(top, r.left, bottom, r.right)
+
+        if pad:
+            r = r.pad(int(pad * r.w))
+        return r
+
+    def shrink(self, px: float) -> Self:
+        """Shrink the ROI by removing the crop bands on the top and bottom if they exist."""
+        top = self.top + int(px) if self.top is not None else None
+        bottom = self.bottom - int(px) if self.bottom is not None else None
+        return self.__class__(self.center, self.radius - px, top, bottom)
+
+    @overload
+    def is_inside(self, point: Point | tuple[int, int]) -> bool: ...
+    @overload
+    def is_inside(self, point: PointArrayLike) -> Bool1DArray: ...
+    def is_inside(self, point: Point | tuple[int, int] | PointArrayLike) -> bool | Bool1DArray:
+        """Check if a point or an array of points is inside the ROI."""
+        is_point = isinstance(point, Point) or (isinstance(point, tuple) and len(point) == 2)
+        points = as_points(point)
+        inside = self.center.distance(points) <= self.radius
+        if self.top is not None:
+            inside &= points[..., 0] >= self.top
+        if self.bottom is not None:
+            inside &= points[..., 0] <= self.bottom
+        return bool(inside[0]) if is_point else inside  # type: ignore
+
+    def transform(
+        self,
+        transform: Transform | None = None,
+        src_top_left: Point | tuple[int, int] = (0, 0),
+        dst_domain: Rect | None = None,
+    ) -> Self | None:
+        """Apply a geometric transformation to the ROISpecs.
+        Returns None if the ROI doesn't follow the standard circular shape with possible crop bands on the top and bottom."""
+        dt = Point.parse(src_top_left)
+        if dst_domain is not None:
+            dt -= dst_domain.top_left
+
+        if transform is None or transform.is_identity():
+            top = int(np.floor(self.top + dt.y)) if self.top is not None else None
+            bottom = int(np.ceil(self.bottom + dt.y)) if self.bottom is not None else None
+            return self.__class__(self.center + dt, self.radius, top, bottom)
+
+        transform = transform.simplify()
+        if isinstance(transform, AffineTransform):
+            if (t := transform.as_translation()) is not None:
+                # If transform is a translation
+                t.t += dt
+                center = Point(*t.transform(self.center)[0])
+                top = int(np.floor(self.top + dt.y)) if self.top is not None else None
+                bottom = int(np.ceil(self.bottom + dt.y)) if self.bottom is not None else None
+                return self.__class__(center, self.radius, top, bottom)
+            if (t := transform.as_resize_translation()) is not None and np.isclose(abs(t.s[0]), abs(t.s[1])):
+                # If transform is a form of isotropic scaling + translation
+                t.t += dt
+                center = Point(*t.transform(self.center)[0])
+                radius = self.radius * abs(t.s[0])
+                top = int(np.floor(t.s[0] * self.top + t.t[0])) if self.top is not None else None
+                bottom = int(np.ceil(t.s[0] * self.bottom + t.t[0])) if self.bottom is not None else None
+                return self.__class__(center, radius, top, bottom)
+            if self.top is None and self.bottom is None and (t := transform.as_similarity_transform()) is not None:
+                # If transform is a Similarity transform (combination of rotation, isotropic scaling and translation) we can keep the circular shape of the ROI
+                t.t += dt
+                center = Point(*t.transform(self.center)[0])
+                radius = self.radius * t.s
+                return self.__class__(center, radius, None, None)
+        return None

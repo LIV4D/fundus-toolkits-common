@@ -207,7 +207,7 @@ class GenericFundusInference[**P]:
             fundus_masks_ = typing.cast(list[npt.NDArray[np.bool_]], fundus_masks)
             if isinstance(fundus_data, FundusData):
                 if not fundus_data.has_roi_mask:
-                    fundus_data.update(fundus_mask=fundus_masks_[0], inplace=True)
+                    fundus_data.update(roi_mask=fundus_masks_[0], inplace=True)
             elif is_fundus_data_sequence(fundus_data):
                 for d, mask in zip(fundus_data, fundus_masks_, strict=True):
                     if not d.has_roi_mask:

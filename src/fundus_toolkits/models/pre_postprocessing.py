@@ -190,6 +190,7 @@ def basic_fundus_pre_postprocessing(
     rgb_to_bgr: bool = False,
     pad: int = 0,
     pad_to_multiple: Optional[int] = None,
+    ensure_square: bool = False,
     auto_resize=True,
     final_activation: Optional[Literal["softmax", "sigmoid"]] = None,  # noqa: F821
 ) -> PrePostProcessing:
@@ -289,10 +290,12 @@ def basic_fundus_pre_postprocessing(
             x = (x - mean) / std
 
         # --- Ensure x shape is a multiple of pad_to_multiple ---
-        if pad > 0 or pad_to_multiple is not None:
+        if pad > 0 or pad_to_multiple is not None or (ensure_square and x.shape[-2] != x.shape[-1]):
             padded_shape = [s + pad for s in x.shape]
             if pad_to_multiple is not None:
                 padded_shape = [ensure_superior_multiple(s, pad_to_multiple) for s in padded_shape]
+            if ensure_square:
+                padded_shape[-2] = padded_shape[-1] = max(*padded_shape[-2:])
             x = crop_pad(x, padded_shape)
 
         return (x,), preprocessing_info

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from types import ModuleType
 from typing import TYPE_CHECKING, TypeGuard, TypeVar
 
@@ -8,8 +9,20 @@ _cv2 = None
 if TYPE_CHECKING:
     import numpy.typing as npt
     import torch
+    import cv2
 
     TensorOrArray = TypeVar("TensorOrArray", torch.Tensor, npt.NDArray)
+
+
+def __getattr__(name: str) -> ModuleType:
+    match name:
+        case "cv2":
+            module = import_cv2()
+        case _:
+            raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    globals()[name] = module
+    return module
 
 
 def is_cv2_available() -> bool:
@@ -22,6 +35,8 @@ def is_cv2_available() -> bool:
     global _cv2
     if _cv2 is None:
         try:
+            os.environ["OPENCV_LOG_LEVEL"] = "ERROR"
+
             import cv2
 
             _cv2 = cv2

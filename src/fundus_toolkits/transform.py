@@ -4,7 +4,7 @@ import abc
 import copy
 import warnings
 from functools import partial
-from typing import Literal, Mapping, Optional, Self, Type, overload
+from typing import TYPE_CHECKING, Literal, Mapping, Optional, Self, Type, overload
 
 import numpy as np
 import numpy.typing as npt
@@ -139,7 +139,13 @@ class Transform(abc.ABC):
         T : FundusProjection
             The composed projection model: T = self @ T1.
         """
+        # simplify_composition() calls _compose
         return TransformComposition.simplify_composition(self, T1)
+
+    def _compose(self, T1: Transform) -> Transform | None:
+        """Composes this projection model with another one and return a single Transform (not a TransformComposition) if they are composable or None otherwise.
+        This method is called by the default implementation of the compose method and can be overridden by subclasses to implement specific composition rules."""
+        return None
 
     def __matmul__(self, T1: Transform) -> Transform:
         """
@@ -167,6 +173,10 @@ class Transform(abc.ABC):
             The inverted projection model: T = self^(-1)
         """
         return InverseTransform(self)
+
+    def simplify(self) -> Transform:
+        """Simplifies this projection model by trying to find a simpler projection model that is equivalent to this one."""
+        return IdentityTransform() if self.is_identity() else self
 
     @property
     def is_exact(self) -> bool:
@@ -364,7 +374,7 @@ class Transform(abc.ABC):
 
         dst_grid = dst_domain.grid_indices(dtype=np.float32).reshape(-1, 2)
         src_remap = self.transform_inverse(dst_grid) - src_domain.top_left.numpy()
-        src_remap = src_remap.reshape(dst_domain.h, dst_domain.w, 2).astype(np.float32)
+        src_remap = src_remap.reshape(*dst_domain.shape, 2).astype(np.float32)
         return cv2.remap(src_img, src_remap[..., ::-1], None, cv2.INTER_LINEAR), dst_domain  # type: ignore
 
     def warped_domain(
@@ -534,7 +544,7 @@ class TransformComposition(Transform):
         for T in Ts:
             if isinstance(T, TransformComposition):
                 expanded_transforms.extend(T.Ts)
-            elif not isinstance(T, IdentityTransform):
+            elif not isinstance((T := T.simplify()), IdentityTransform):
                 expanded_transforms.append(T)
         Ts_ = list(expanded_transforms)
 
@@ -544,7 +554,14 @@ class TransformComposition(Transform):
             i = 0
             while i < len(Ts_) - 1:
                 T1, T2 = Ts_[i], Ts_[i + 1]
-                if (isinstance(T1, InverseTransform) and T1.T is T2) or (
+                if T1.is_identity():
+                    simplified = True
+                    del Ts_[i]
+                elif (T1T2 := T1._compose(T2)) is not None:
+                    simplified = True
+                    Ts_[i] = T1T2
+                    del Ts_[i + 1]
+                elif (isinstance(T1, InverseTransform) and T1.T is T2) or (
                     isinstance(T2, InverseTransform) and T2.T is T1
                 ):
                     simplified = True
@@ -563,6 +580,9 @@ class TransformComposition(Transform):
         if isinstance(T1, TransformComposition):
             return TransformComposition.simplify_composition(*self.Ts, *T1.Ts)
         return TransformComposition.simplify_composition(*self.Ts, T1)
+
+    def simplify(self) -> Transform:
+        return TransformComposition.simplify_composition(*self.Ts)
 
     @property
     def is_exact(self) -> bool:
@@ -616,6 +636,13 @@ class InverseTransform(Transform):
     def invert(self) -> Transform:
         return self.T
 
+    def simplify(self) -> Transform:
+        if isinstance(self.T, InverseTransform):
+            return self.T.T.simplify()
+        if not isinstance(invT := self.T.invert(), InverseTransform):
+            return invT.simplify()
+        return self
+
     def is_identity(self) -> bool:
         return self.T.is_identity()
 
@@ -651,6 +678,9 @@ class IdentityTransform(Transform):
     def is_identity(self) -> bool:
         return True
 
+    def simplify(self) -> Transform:
+        return self
+
     @property
     def is_exact(self) -> bool:
         return True
@@ -671,7 +701,7 @@ class IdentityTransform(Transform):
             return False
         return value.is_identity()
 
-    def compose(self, T1: Transform) -> Transform:
+    def _compose(self, T1: Transform) -> Transform | None:
         return T1
 
     def transform(self, src: FloatPairArrayLike) -> FloatPairArray:
@@ -751,26 +781,28 @@ class AffineTransform(Transform):
         src, dst = np.asarray(src), np.asarray(dst)
         assert src.shape == dst.shape, "src and dst must have the same shape"
         src = np.concatenate((src, np.ones((src.shape[0], 1))), axis=1)
-        X, _, _, _ = np.linalg.lstsq(src, dst, rcond=None)
+        X, _, _, _ = np.linalg.lstsq(src, dst, rcond=None)  # type: ignore
         R, t = X[:2].T, X[2]
         error = np.sum((dst - src @ X) ** 2, axis=1)
         return cls(R, t), np.mean(error)
 
-    @overload
-    def compose(self, T1: AffineTransform) -> AffineTransform: ...
-    @overload
-    def compose(self, T1: Transform) -> Transform: ...
-    def compose(self, T1: Transform) -> Transform:
+    if TYPE_CHECKING:
+
+        @overload
+        def compose(self, T1: AffineTransform) -> AffineTransform: ...
+        @overload
+        def compose(self, T1: Transform) -> Transform: ...
+        def compose(self, T1: Transform) -> Transform: ...
+
+        @overload
+        def __matmul__(self, T1: AffineTransform) -> AffineTransform: ...
+        @overload
+        def __matmul__(self, T1: Transform) -> Transform: ...
+        def __matmul__(self, T1: Transform) -> Transform: ...
+
+    def _compose(self, T1: Transform) -> Transform | None:
         if isinstance(T1, AffineTransform):
             return AffineTransform(T1.H @ self.H, T1.H @ self.t + T1.t)
-        return super().compose(T1)
-
-    @overload
-    def __matmul__(self, T1: AffineTransform) -> AffineTransform: ...
-    @overload
-    def __matmul__(self, T1: Transform) -> Transform: ...
-    def __matmul__(self, T1: Transform) -> Transform:
-        return T1.compose(self)
 
     def is_identity(self) -> bool:
         return bool(np.allclose(self.H, np.eye(2)) and np.allclose(self.t, 0))
@@ -808,6 +840,34 @@ class AffineTransform(Transform):
     @property
     def M(self):
         return np.concatenate((self.H, self.t[:, None]), axis=1)
+
+    @property
+    def scaling(self):
+        """The overall scaling factor of this affine transformation.
+        (The square root of the determinant of H.)"""
+        det = np.linalg.det(self.H)
+        scaling = np.sqrt(np.abs(det))
+        return scaling if det >= 0 else -scaling
+
+    def as_translation(self) -> Translation | None:
+        """If this affine transformation is a translation, returns the corresponding Translation object. Otherwise, returns None."""
+        if not np.allclose(self.H, np.eye(2)):
+            return None
+        return Translation(t=self.t)
+
+    def as_similarity_transform(self) -> SimilarityTransform | None:
+        """If this affine transformation is a similarity transformation, returns the corresponding SimilarityTransform object. Otherwise, returns None."""
+        if not np.allclose(self.H[0, 0], self.H[1, 1]) or not np.allclose(self.H[0, 1], -self.H[1, 0]):
+            return None
+        s = self.H[0, 0]
+        r = np.arctan2(self.H[1, 0] / s, self.H[0, 0] / s)
+        return SimilarityTransform(s=s, r=r, t=self.t)
+
+    def as_resize_translation(self) -> ResizeTranslation | None:
+        """If this affine transformation is a resize and translation transformation, returns the corresponding ResizeTranslation object. Otherwise, returns None."""
+        if not np.allclose(self.H[[0, 1], [1, 0]], 0):
+            return None
+        return ResizeTranslation(s=self.H.diagonal(), t=self.t)
 
     def _warp[DTYPE: np.uint8 | np.float32](
         self, src_img: npt.NDArray[DTYPE], src_domain: Rect, dst_domain: Rect
@@ -979,11 +1039,7 @@ class SimilarityTransform(AffineTransform):
         """
         return SimilarityTransform(s=1 / self.s, r=-self.r, t=self.transform_inverse(np.zeros(2))[0])
 
-    @overload
-    def compose(self, T1: AffineTransform) -> AffineTransform: ...
-    @overload
-    def compose(self, T1: Transform) -> Transform: ...
-    def compose(self, T1: Transform) -> Transform:
+    def _compose(self, T1: Transform) -> Transform | None:
         """Composes this similarity transform with another projection model.
         If the other projection model is also a similarity transform, the composition is simplified to a single similarity transform. Otherwise, the composition is returned as a ProjectionComposition.
 
@@ -1005,7 +1061,7 @@ class SimilarityTransform(AffineTransform):
         """  # noqa: E501
         if isinstance(T1, SimilarityTransform):
             return SimilarityTransform(s=self.s * T1.s, r=self.r + T1.r, t=T1.transform(self.t)[0])
-        return super().compose(T1)
+        return super()._compose(T1)
 
     def transform_inverse(self, dst: FloatPairArrayLike) -> FloatPairArray:
         """
@@ -1143,14 +1199,10 @@ class ResizeTranslation(AffineTransform):
     def is_yx_independent(self) -> bool:
         return True
 
-    @overload
-    def compose(self, T1: AffineTransform) -> AffineTransform: ...
-    @overload
-    def compose(self, T1: Transform) -> Transform: ...
-    def compose(self, T1: Transform) -> Transform:
+    def _compose(self, T1: Transform) -> Transform | None:
         if isinstance(T1, ResizeTranslation):
             return ResizeTranslation(s=self.s * T1.s, t=T1.transform(self.t)[0])
-        return super().compose(T1)
+        return super()._compose(T1)
 
     def transform(self, src: FloatPairArrayLike) -> FloatPairArray:
         src = as_float_pairs(src)
@@ -1163,10 +1215,14 @@ class ResizeTranslation(AffineTransform):
     def _warp[DTYPE: np.uint8 | np.float32](
         self, src_img: npt.NDArray[DTYPE], src_domain: Rect, dst_domain: Rect
     ) -> tuple[npt.NDArray[DTYPE], Rect]:
-        cv2 = import_cv2()
+        from fundus_toolkits.utils.safe_import import cv2  #
 
         dst_region_domain = self.transform_domain(src_domain)
-        dst_region = cv2.resize(src_img, dsize=dst_domain.size.xy, fx=self.s[1], fy=self.s[0])  # type: ignore
+        if np.issubdtype(src_img.dtype, np.integer):
+            interpolation = cv2.INTER_NEAREST
+        else:
+            interpolation = cv2.INTER_AREA if abs(self.s[0]) < 1 else cv2.INTER_LINEAR
+        dst_region = cv2.resize(src_img, dst_domain.size.xy, fx=self.s[1], fy=self.s[0], interpolation=interpolation)
         dst = dst_domain.crop_pad_image(dst_region, origin=-dst_region_domain.top_left, channel_last=True, copy=False)
         return dst, dst_domain  # type: ignore
 
@@ -1237,14 +1293,10 @@ class Translation(ResizeTranslation):
     def transform_inverse(self, dst: FloatPairArrayLike) -> FloatPairArray:
         return as_float_pairs(dst) - self.t  # type: ignore
 
-    @overload
-    def compose(self, T1: AffineTransform) -> AffineTransform: ...
-    @overload
-    def compose(self, T1: Transform) -> Transform: ...
-    def compose(self, T1: Transform) -> Transform:
+    def _compose(self, T1: Transform) -> Transform | None:
         if isinstance(T1, Translation):
             return Translation(self.t + T1.t)
-        return super().compose(T1)
+        return super()._compose(T1)
 
     @classmethod
     def identity(cls) -> Transform:
@@ -1371,7 +1423,7 @@ class RadialToRadialTransform(Transform):
         dst = dst_flat * (1 + self.k_dst * np.square(r_dst))
         return dst + self.center_dst
 
-    def compose(self, T1: Transform) -> Transform:
+    def _compose(self, T1: Transform) -> Transform | None:
         if isinstance(T1, RadialToRadialTransform) and self.k_dst == 0 and T1.k_src == 0:
             # Composable only if this projection has no dst radial distortion and T1 as no src radial distortion
             H = T1.H @ self.H
@@ -1380,7 +1432,7 @@ class RadialToRadialTransform(Transform):
             return RadialToRadialTransform(
                 center_src=self.center_src, k_src=self.k_src, center_dst=T1.center_dst, k_dst=T1.k_dst, H=H, t=t
             )
-        return super().compose(T1)
+        return super()._compose(T1)
 
     def split_spheric_projections(self) -> tuple[RadialToRadialTransform, RadialToRadialTransform]:
         """Splits this projection into two projections: one from the source to a flat coordinate system and one from the flat coordinate system to the destination.

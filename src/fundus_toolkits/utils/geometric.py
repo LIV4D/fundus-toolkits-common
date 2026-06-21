@@ -384,7 +384,7 @@ class Rect(NamedTuple):
             dst_tensor = dst_tensor.permute(1, 2, 0)
         return dst_tensor
 
-    def grid_indices(self, dtype=np.int_) -> npt.NDArray[np.int_]:
+    def grid_indices[T: np.generic](self, dtype: type[T] = np.int_) -> npt.NDArray[T]:
         """Get the grid indices of the rectangle as an array of shape (h, w, 2)"""
         h = int(math.ceil(self.h))
         w = int(math.ceil(self.w))

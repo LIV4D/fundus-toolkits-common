@@ -106,13 +106,14 @@ def read_image(
         Otherwise, the image is a uint8 array (dtype: uint8).
     """
     from .image import resize as resize_image
-    from .safe_import import import_cv2, is_cv2_available
+    from .safe_import import is_cv2_available
 
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=".*grfmt_tiff.*")
 
         if is_cv2_available():
-            cv2 = import_cv2()
+            from .safe_import import cv2
+
             img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
             if img is None:
                 raise ValueError(f"Could not load image from {path}")
@@ -211,7 +212,7 @@ def write_image(
         - "skip": do nothing.
         - "overwrite": overwrite the existing file.
     """
-    from .safe_import import import_cv2, is_cv2_available
+    from .safe_import import is_cv2_available
 
     # -- Convert image to uint8 numpy array --
     if is_torch_tensor(img):
@@ -249,7 +250,8 @@ def write_image(
 
     # -- Save image --
     if is_cv2_available():
-        cv2 = import_cv2()
+        from .safe_import import cv2
+
         if img.ndim == 3:
             img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
