@@ -244,14 +244,14 @@ class FundusData:
         self._immutable = immutable
 
     @classmethod
-    def empty_like(cls, data: ImageSource) -> Self:
+    def empty_like(cls, data: ImageSource, immutable: bool = False) -> Self:
         """Convert the given data to a fundus image format (numpy array of shape (3, H, W) and type float32)."""
         name = None
         if isinstance(data, str):
             name = Path(data).stem
         elif isinstance(data, Path):
             name = data.stem
-        return cls(shape=data, name=name)
+        return cls(shape=data, name=name, immutable=immutable)
 
     type Fields = Literal["image", "fundus_mask", "vessels", "av", "od", "macula"]
 
@@ -408,6 +408,8 @@ class FundusData:
             A copy of this FundusData.
 
         """
+        if mutable is False and self._immutable:
+            return self
         other = copy(self)
         if mutable is None:
             mutable = not self._immutable
@@ -1461,9 +1463,11 @@ class FundusData:
         if self._macula is not None:
             other._macula, _ = transform.warp(self._macula, src_top_left, dst_domain)
         if self._od_center not in (None, ABSENT):
-            other._od_center = transform.transform(self._od_center + src_top_left) - dst_domain.top_left
+            other._od_center = Point.parse(transform.transform(self._od_center + src_top_left)[0]) - dst_domain.top_left
         if self._macula_center not in (None, ABSENT):
-            other._macula_center = transform.transform(self._macula_center + src_top_left) - dst_domain.top_left
+            other._macula_center = (
+                Point.parse(transform.transform(self._macula_center + src_top_left)[0]) - dst_domain.top_left
+            )
 
         if not transform.is_identity():
             if isinstance(transform, AffineTransform):
@@ -1725,7 +1729,7 @@ class FundusROISpecs:
 
         return cls(center, radius, top, bottom)
 
-    def to_mask(self, shape: Tuple[int, int]) -> Bool2DArray:
+    def to_mask(self, shape: Tuple[int, int], disk_only: bool = False) -> Bool2DArray:
         """Convert the ROISpecs to a binary mask of the given shape."""
         from skimage.morphology import disk
 
@@ -1734,10 +1738,11 @@ class FundusROISpecs:
         disk_mask: Bool2DArray = disk(self.radius, dtype=np.bool_)  # type: ignore
         mask = Rect.from_size(shape).crop_pad_image(disk_mask, origin=(-y0, -x0), copy=False)
 
-        if self.top is not None:
-            mask[: self.top] = False
-        if self.bottom is not None:
-            mask[self.bottom :] = False
+        if not disk_only:
+            if self.top is not None:
+                mask[: self.top] = False
+            if self.bottom is not None:
+                mask[self.bottom :] = False
         return mask  # type: ignore
 
     def to_rect(self, ensure_square: bool = False, pad: float = 0) -> Rect:

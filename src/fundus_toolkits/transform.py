@@ -225,6 +225,7 @@ class Transform(abc.ABC):
         dst : FloatPairArray
             The transformed points coordinates (N x 2).
         """
+        # TODO: Move the transform logic to _transform and add automatic conversion type for Point, Rect, etc...
         raise NotImplementedError(f"{self.__class__.__name__} does not implement the 'transform' method")
 
     def transform_inverse(self, dst: FloatPairArrayLike) -> FloatPairArray:
